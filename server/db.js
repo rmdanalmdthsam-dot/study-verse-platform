@@ -11,6 +11,18 @@ const DATA_DIR = process.env.VERCEL === '1'
   : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'database.json');
 const SECRET_KEY = process.env.JWT_SECRET || 'study_app_token_secret_key_2026';
+const cloudUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
+let sql = null;
+let cloudLoaded = false;
+let cloudDb = null;
+if (cloudUrl) {
+  try {
+    const { neon } = await import('@neondatabase/serverless');
+    sql = neon(cloudUrl);
+  } catch (err) {
+    console.error('Failed to initialize database:', err);
+  }
+}
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -58,7 +70,48 @@ const defaultStructure = {
   pomodoroSessions: []
 };
 
+export async function loadCloudDb() {
+  if (!sql || cloudLoaded) return cloudDb || getLocalDb();
+  try {
+    await sql`CREATE TABLE IF NOT EXISTS study_app_state (id INTEGER PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`;
+    const rows = await sql`SELECT data FROM study_app_state WHERE id = 1`;
+    if (rows.length) {
+      cloudDb = rows[0].data;
+    } else {
+      cloudDb = structuredClone(defaultStructure);
+      await sql`INSERT INTO study_app_state (id, data) VALUES (1, ${JSON.stringify(cloudDb)}::jsonb)`;
+    }
+  } catch (err) {
+    console.error('Failed to load cloud database:', err);
+    cloudDb = getLocalDb();
+  }
+  cloudLoaded = true;
+  return cloudDb;
+}
+
+function getLocalDb() {
+  if (!fs.existsSync(DB_FILE)) {
+    fs.writeFileSync(DB_FILE, JSON.stringify(defaultStructure, null, 2), 'utf-8');
+    return structuredClone(defaultStructure);
+  }
+  try {
+    const raw = fs.readFileSync(DB_FILE, 'utf-8');
+    const parsed = JSON.parse(raw);
+    return {
+      users: parsed.users || [],
+      subjects: parsed.subjects || [],
+      files: parsed.files || [],
+      notes: parsed.notes || [],
+      flashcards: parsed.flashcards || [],
+      pomodoroSessions: parsed.pomodoroSessions || []
+    };
+  } catch {
+    return structuredClone(defaultStructure);
+  }
+}
+
 export function getDb() {
+  if (cloudDb) return cloudDb;
   if (!fs.existsSync(DB_FILE)) {
     fs.writeFileSync(DB_FILE, JSON.stringify(defaultStructure, null, 2), 'utf-8');
     return defaultStructure;
@@ -80,15 +133,22 @@ export function getDb() {
 }
 
 export function saveDb(data) {
+  cloudDb = data;
   try {
     const tempFile = `${DB_FILE}.tmp`;
     fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
     fs.renameSync(tempFile, DB_FILE);
-    return true;
   } catch (err) {
     console.error('Error saving db:', err);
-    return false;
   }
+  if (sql) {
+    void sql`
+      INSERT INTO study_app_state (id, data, updated_at)
+      VALUES (1, ${JSON.stringify(data)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `.catch((err) => console.error('Failed to save cloud database:', err));
+  }
+  return true;
 }
 
 export function initUserStarterData(db, userId, userName = 'طالب') {
