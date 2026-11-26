@@ -564,6 +564,8 @@ app.get('/api/files/:id/content', auth, async (req, res) => {
   if (file.type === 'pdf') {
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || file.title || 'document.pdf')}`);
+  } else if (['image', 'video', 'audio'].includes(file.type)) {
+    res.type(file.mimeType || path.extname(file.originalName || relativeUrl) || 'application/octet-stream');
   } else {
     res.setHeader('Content-Type', 'application/octet-stream');
   }
