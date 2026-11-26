@@ -11,7 +11,7 @@ import {
   Download,
   Maximize2
 } from 'lucide-react';
-import { deleteFile } from '../utils/api';
+import { deleteFile, getDownloadUrl } from '../utils/api';
 import useFileContentUrl from '../hooks/useFileContentUrl';
 
 function GalleryThumbnail({ file }) {
@@ -19,6 +19,7 @@ function GalleryThumbnail({ file }) {
   return (
     <img
       src={contentUrl || undefined}
+      crossOrigin="use-credentials"
       alt={file.title}
       className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
     />
@@ -155,7 +156,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
                 <RotateCw className="w-4 h-4" />
               </button>
               <a
-                href={activeImageUrl || undefined}
+                href={activeImageUrl ? getDownloadUrl(activeImageUrl) : undefined}
                 download
                 target="_blank"
                 rel="noreferrer"
@@ -178,6 +179,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
           <div className="flex-1 overflow-auto flex items-center justify-center p-4">
             <img
               src={activeImageUrl || undefined}
+              crossOrigin="use-credentials"
               alt={activeImage.title}
               style={{
                 transform: `scale(${zoomLevel}) rotate(${rotation}deg)`,

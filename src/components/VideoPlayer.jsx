@@ -137,6 +137,7 @@ export default function VideoPlayer({ files = [], subjects = [], onFileUpdated, 
           <div className="flex-1 bg-black flex flex-col items-center justify-center relative">
             <video
               ref={videoRef}
+              crossOrigin="use-credentials"
               src={videoContentUrl || undefined}
               controls
               onTimeUpdate={handleTimeUpdate}

@@ -14,7 +14,7 @@ import {
   StickyNote,
   Send
 } from 'lucide-react';
-import { updateFile, deleteFile, createNote } from '../utils/api';
+import { updateFile, deleteFile, createNote, getDownloadUrl } from '../utils/api';
 import useFileContentUrl from '../hooks/useFileContentUrl';
 
 export default function PdfReader({ files = [], subjects = [], onFileUpdated, onFileDeleted }) {
@@ -112,7 +112,7 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
             </button>
 
             <a
-              href={pdfContentUrl || undefined}
+              href={pdfContentUrl ? getDownloadUrl(pdfContentUrl) : undefined}
               download
               target="_blank"
               rel="noreferrer"

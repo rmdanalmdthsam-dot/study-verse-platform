@@ -1,6 +1,9 @@
 import { uploadPresigned } from '@vercel/blob/client';
 
-const BASE_URL = '';
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+if (import.meta.env.PROD && BASE_URL && !BASE_URL.startsWith('https://')) {
+  throw new Error('VITE_API_BASE_URL must use HTTPS in production');
+}
 
 export function getAuthToken() {
   return localStorage.getItem('study_token');
@@ -24,11 +27,20 @@ export async function getFileContentUrl(file) {
   if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
   const response = await fetch(`${BASE_URL}/api/files/${encodeURIComponent(file.id)}/access`, {
     method: 'POST',
-    headers: authHeaders()
+    headers: authHeaders(),
+    credentials: 'include'
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'تعذر فتح الملف');
-  return data.url;
+  return `${BASE_URL}${data.url}`;
+}
+
+export function getDownloadUrl(contentUrl) {
+  const downloadUrl = new URL(contentUrl, window.location.origin);
+  if (/\/api\/files\/[^/]+\/content$/.test(downloadUrl.pathname)) {
+    downloadUrl.searchParams.set('download', '1');
+  }
+  return downloadUrl.toString();
 }
 
 export async function downloadBackup(onProgress) {

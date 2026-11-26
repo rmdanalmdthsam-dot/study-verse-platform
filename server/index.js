@@ -29,7 +29,38 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: '*' }));
+const trustedOrigins = new Set([
+  'capacitor://localhost',
+  'https://localhost'
+]);
+if (process.env.NODE_ENV !== 'production') {
+  for (const origin of ['http://localhost', 'http://localhost:5173', 'http://127.0.0.1:5173']) {
+    trustedOrigins.add(origin);
+  }
+}
+for (const configuredOrigin of (process.env.CORS_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean)) {
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(configuredOrigin);
+  } catch {
+    throw new Error(`CORS_ORIGINS must contain exact origins: ${configuredOrigin}`);
+  }
+  const normalizedOrigin = parsedOrigin.origin === 'null'
+    ? `${parsedOrigin.protocol}//${parsedOrigin.host}`
+    : parsedOrigin.origin;
+  if (!['http:', 'https:', 'capacitor:'].includes(parsedOrigin.protocol) ||
+    normalizedOrigin !== configuredOrigin || !['', '/'].includes(parsedOrigin.pathname) ||
+    parsedOrigin.search || parsedOrigin.hash ||
+    (process.env.NODE_ENV === 'production' && parsedOrigin.protocol === 'http:')) {
+    throw new Error(`CORS_ORIGINS must contain exact origins: ${configuredOrigin}`);
+  }
+  trustedOrigins.add(configuredOrigin);
+}
+
+app.use(cors({
+  origin: (origin, callback) => callback(null, Boolean(origin && trustedOrigins.has(origin))),
+  credentials: true
+}));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
@@ -584,9 +615,12 @@ app.post('/api/files/:id/access', auth, (req, res) => {
 
   const token = createMediaToken(req.userId, file.id, req.tokenId);
   const cookiePath = `/api/files/${encodeURIComponent(file.id)}/content`;
-  const secure = process.env.VERCEL === '1' || req.secure;
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0].trim().toLowerCase();
+  const secure = process.env.VERCEL === '1' || req.secure || forwardedProto === 'https';
+  const sameSite = secure ? 'None; Secure' : 'Strict';
   res.setHeader('Cache-Control', 'private, no-store');
-  res.setHeader('Set-Cookie', `media_access=${token}; Max-Age=900; Path=${cookiePath}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`);
+  res.setHeader('Set-Cookie', `media_access=${token}; Max-Age=900; Path=${cookiePath}; HttpOnly; SameSite=${sameSite}`);
   res.json({ url: cookiePath });
 });
 
@@ -640,7 +674,8 @@ app.get('/api/files/:id/content', async (req, res) => {
       const metadata = getContentMetadata(file, blob.blob.contentType);
       res.status(contentRange ? 206 : 200);
       res.setHeader('Content-Type', metadata.contentType);
-      res.setHeader('Content-Disposition', `${metadata.disposition}; filename*=UTF-8''${metadata.filename}`);
+      const disposition = req.query.download === '1' ? 'attachment' : metadata.disposition;
+      res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${metadata.filename}`);
       if (contentRange) res.setHeader('Content-Range', contentRange);
       if (contentLength) res.setHeader('Content-Length', contentLength);
       return Readable.fromWeb(blob.stream).pipe(res);
@@ -660,7 +695,8 @@ app.get('/api/files/:id/content', async (req, res) => {
   const range = req.headers.range;
   const metadata = getContentMetadata(file, file.mimeType);
   res.setHeader('Content-Type', metadata.contentType);
-  res.setHeader('Content-Disposition', `${metadata.disposition}; filename*=UTF-8''${metadata.filename}`);
+  const disposition = req.query.download === '1' ? 'attachment' : metadata.disposition;
+  res.setHeader('Content-Disposition', `${disposition}; filename*=UTF-8''${metadata.filename}`);
 
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range);
