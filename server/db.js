@@ -151,6 +151,22 @@ export function saveDb(data) {
   return true;
 }
 
+export async function saveDbAsync(data) {
+  if (sql) {
+    await sql`
+      INSERT INTO study_app_state (id, data, updated_at)
+      VALUES (1, ${JSON.stringify(data)}::jsonb, NOW())
+      ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()
+    `;
+  } else {
+    const tempFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf-8');
+    fs.renameSync(tempFile, DB_FILE);
+  }
+  cloudDb = data;
+  return true;
+}
+
 export function initUserStarterData(db, userId, userName = 'طالب') {
   const s1 = `sub-${userId}-1`;
   const s2 = `sub-${userId}-2`;

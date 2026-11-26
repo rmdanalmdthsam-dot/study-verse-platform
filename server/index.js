@@ -5,10 +5,15 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import QRCode from 'qrcode';
+import { randomUUID } from 'crypto';
+import { Readable } from 'stream';
+import { del, get, head, issueSignedToken } from '@vercel/blob';
+import { handleUploadPresigned } from '@vercel/blob/client';
 import { fileURLToPath } from 'url';
 import {
   getDb,
   saveDb,
+  saveDbAsync,
   hashPassword,
   verifyPassword,
   createToken,
@@ -44,6 +49,14 @@ const VIDEO_DIR = path.join(UPLOADS_DIR, 'videos');
 const IMAGE_DIR = path.join(UPLOADS_DIR, 'images');
 const AUDIO_DIR = path.join(UPLOADS_DIR, 'audio');
 const OTHER_DIR = path.join(UPLOADS_DIR, 'others');
+const BLOB_STORE_ID = process.env.BLOB_WEBHOOK_PUBLIC_KEY_STORE_ID;
+const BLOB_READ_WRITE_TOKEN = process.env.BLOB_WEBHOOK_PUBLIC_KEY_READ_WRITE_TOKEN;
+const BLOB_WEBHOOK_PUBLIC_KEY = process.env.BLOB_WEBHOOK_PUBLIC_KEY_WEBHOOK_PUBLIC_KEY;
+const MAX_UPLOAD_SIZE = 1024 * 1024 * 1024;
+const BLOB_OPTIONS = {
+  token: BLOB_READ_WRITE_TOKEN,
+  storeId: BLOB_STORE_ID
+};
 
 [UPLOADS_DIR, PDF_DIR, VIDEO_DIR, IMAGE_DIR, AUDIO_DIR, OTHER_DIR].forEach((d) => {
   if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
@@ -115,6 +128,109 @@ function auth(req, res, next) {
   }
   req.userId = userId;
   next();
+}
+
+function getRequestUserId(req) {
+  const header = req.headers.authorization;
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+  const token = header && header.startsWith('Bearer ')
+    ? header.slice(7).trim()
+    : queryToken;
+  return verifyToken(token);
+}
+
+function classifyFile(originalName, mimeType = '') {
+  const mime = mimeType.toLowerCase();
+  const ext = path.extname(originalName).toLowerCase();
+  if (mime.includes('pdf') || ext === '.pdf') return 'pdf';
+  if (mime.startsWith('video/') || ['.mp4', '.webm', '.mov', '.m4v'].includes(ext)) return 'video';
+  if (mime.startsWith('image/') || ['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) return 'image';
+  if (mime.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.aac', '.ogg'].includes(ext)) return 'audio';
+  return 'other';
+}
+
+function parseUploadMetadata(clientPayload, userId, pathname) {
+  let metadata;
+  try {
+    metadata = JSON.parse(clientPayload || '');
+  } catch {
+    throw new Error('بيانات الملف غير صالحة');
+  }
+
+  if (!metadata || typeof metadata !== 'object'
+    || typeof metadata.id !== 'string'
+    || !/^file_[0-9a-f-]{36}$/i.test(metadata.id)
+    || typeof metadata.originalName !== 'string'
+    || !metadata.originalName.trim()
+    || metadata.originalName.length > 255
+    || typeof metadata.title !== 'string'
+    || metadata.title.length > 200
+    || !Number.isSafeInteger(metadata.size)
+    || metadata.size < 0
+    || metadata.size > MAX_UPLOAD_SIZE
+    || typeof metadata.contentType !== 'string'
+    || !/^[\w!#$&^_.+-]+\/[\w!#$&^_.+-]+$/.test(metadata.contentType)) {
+    throw new Error('بيانات الملف غير صالحة');
+  }
+
+  const expectedPrefix = `users/${userId}/`;
+  if (!pathname.startsWith(expectedPrefix) || pathname.includes('..') || pathname.split('/').length !== 3) {
+    throw new Error('مسار الملف غير صالح');
+  }
+
+  return {
+    id: metadata.id,
+    userId,
+    pathname,
+    originalName: metadata.originalName.trim(),
+    title: metadata.title.trim() || metadata.originalName.trim(),
+    subjectId: typeof metadata.subjectId === 'string' ? metadata.subjectId.slice(0, 128) : '',
+    tags: Array.isArray(metadata.tags)
+      ? metadata.tags.filter((tag) => typeof tag === 'string').slice(0, 20).map((tag) => tag.slice(0, 50))
+      : [],
+    size: metadata.size,
+    contentType: metadata.contentType
+  };
+}
+
+async function saveBlobFile(metadata, blob) {
+  if (!blob || blob.pathname !== metadata.pathname || blob.size !== metadata.size) {
+    throw new Error('بيانات الملف المرفوع لا تطابق الطلب');
+  }
+
+  const db = structuredClone(getDb());
+  const existing = db.files.find((file) => file.pathname === metadata.pathname);
+  if (existing) {
+    if (existing.userId !== metadata.userId || existing.id !== metadata.id) {
+      throw new Error('تعارض في بيانات الملف');
+    }
+    return existing;
+  }
+
+  const ownsSubject = db.subjects.some(
+    (subject) => subject.id === metadata.subjectId && subject.userId === metadata.userId
+  );
+  const newFile = {
+    id: metadata.id,
+    userId: metadata.userId,
+    title: metadata.title,
+    filename: path.basename(metadata.pathname),
+    originalName: metadata.originalName,
+    type: classifyFile(metadata.originalName, blob.contentType || metadata.contentType),
+    mimeType: blob.contentType || metadata.contentType,
+    storage: 'blob',
+    pathname: metadata.pathname,
+    subjectId: ownsSubject ? metadata.subjectId : '',
+    size: blob.size,
+    url: `/api/files/${encodeURIComponent(metadata.id)}/content`,
+    tags: metadata.tags,
+    timestampNotes: [],
+    createdAt: new Date().toISOString()
+  };
+
+  db.files.unshift(newFile);
+  await saveDbAsync(db);
+  return newFile;
 }
 
 // Auth API
@@ -238,6 +354,12 @@ app.get('/api/files', auth, (req, res) => {
   res.json(list);
 });
 
+app.get('/api/files/storage-mode', (req, res) => {
+  res.json({
+    blobUploadsEnabled: Boolean(BLOB_STORE_ID && BLOB_READ_WRITE_TOKEN && BLOB_WEBHOOK_PUBLIC_KEY)
+  });
+});
+
 app.post('/api/files/upload', auth, upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'لم يتم اختيار ملف' });
   const { title, subjectId, tags } = req.body;
@@ -272,10 +394,124 @@ app.post('/api/files/upload', auth, upload.single('file'), (req, res) => {
   res.status(201).json(newFile);
 });
 
-app.get('/api/files/:id/content', auth, (req, res) => {
+app.post('/api/files/upload-presigned', async (req, res) => {
+  if (!BLOB_STORE_ID || !BLOB_READ_WRITE_TOKEN || !BLOB_WEBHOOK_PUBLIC_KEY) {
+    return res.status(503).json({ error: 'التخزين السحابي غير مهيأ حالياً' });
+  }
+
+  try {
+    const result = await handleUploadPresigned({
+      body: req.body,
+      request: req,
+      webhookPublicKey: BLOB_WEBHOOK_PUBLIC_KEY,
+      getSignedToken: async (pathname, clientPayload) => {
+        const userId = getRequestUserId(req);
+        if (!userId) throw new Error('Not authorized');
+
+        const metadata = parseUploadMetadata(clientPayload, userId, pathname);
+        const token = await issueSignedToken({
+          ...BLOB_OPTIONS,
+          pathname,
+          operations: ['put'],
+          maximumSizeInBytes: MAX_UPLOAD_SIZE,
+          validUntil: Date.now() + 15 * 60 * 1000
+        });
+
+        return {
+          token,
+          urlOptions: {
+            addRandomSuffix: false,
+            allowOverwrite: false,
+            tokenPayload: JSON.stringify(metadata)
+          }
+        };
+      },
+      onUploadCompleted: async ({ blob, tokenPayload }) => {
+        const metadata = JSON.parse(tokenPayload || '');
+        await saveBlobFile(metadata, blob);
+      }
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('Blob upload handling failed:', err);
+    const status = err.message === 'Not authorized' ? 401 : 400;
+    res.status(status).json({
+      error: err.message === 'Not authorized' ? 'تسجيل الدخول مطلوب' : 'تعذر رفع الملف إلى التخزين السحابي'
+    });
+  }
+});
+
+app.post('/api/files/finalize-upload', auth, async (req, res) => {
+  if (!BLOB_STORE_ID || !BLOB_READ_WRITE_TOKEN) {
+    return res.status(503).json({ error: 'التخزين السحابي غير مهيأ حالياً' });
+  }
+
+  try {
+    const metadata = parseUploadMetadata(
+      JSON.stringify(req.body.metadata || {}),
+      req.userId,
+      req.body.pathname || ''
+    );
+    const blob = await head(metadata.pathname, { ...BLOB_OPTIONS, access: 'private' });
+    if (!blob) return res.status(404).json({ error: 'الملف المرفوع غير موجود' });
+
+    const savedFile = await saveBlobFile(metadata, blob);
+    res.status(201).json(savedFile);
+  } catch (err) {
+    console.error('Blob upload finalization failed:', err);
+    res.status(400).json({ error: 'تعذر حفظ بيانات الملف' });
+  }
+});
+
+app.get('/api/files/:id/content', auth, async (req, res) => {
   const db = getDb();
   const file = db.files.find((item) => item.id === req.params.id && item.userId === req.userId);
   if (!file) return res.status(404).json({ error: 'الملف غير موجود' });
+
+  if (file.storage === 'blob' && file.pathname) {
+    try {
+      const range = req.headers.range;
+      if (range) {
+        const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+        if (!match || (!match[1] && !match[2]) || file.size <= 0) {
+          res.setHeader('Content-Range', `bytes */${file.size || 0}`);
+          return res.status(416).end();
+        }
+        const suffixLength = Number(match[2]);
+        const start = match[1]
+          ? Number(match[1])
+          : Math.max(file.size - suffixLength, 0);
+        const end = match[1] && match[2]
+          ? Number(match[2])
+          : file.size - 1;
+        if (start >= file.size || end >= file.size || start > end) {
+          res.setHeader('Content-Range', `bytes */${file.size}`);
+          return res.status(416).end();
+        }
+      }
+
+      const blob = await get(file.pathname, {
+        ...BLOB_OPTIONS,
+        access: 'private',
+        headers: range ? { Range: range } : undefined
+      });
+      if (!blob) return res.status(404).json({ error: 'الملف غير موجود في التخزين السحابي' });
+
+      const contentRange = blob.headers.get('content-range');
+      const contentLength = blob.headers.get('content-length');
+      res.status(contentRange ? 206 : 200);
+      res.setHeader('Accept-Ranges', 'bytes');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Type', file.type === 'pdf' ? 'application/pdf' : (file.mimeType || blob.blob.contentType));
+      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || file.title || 'file')}`);
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      if (contentLength) res.setHeader('Content-Length', contentLength);
+      return Readable.fromWeb(blob.stream).pipe(res);
+    } catch (err) {
+      console.error('Blob content read failed:', err);
+      return res.status(502).json({ error: 'تعذر فتح الملف من التخزين السحابي' });
+    }
+  }
 
   const relativeUrl = (file.url || '').replace(/^\/uploads\//, '');
   if (!relativeUrl) return res.status(404).json({ error: 'مسار الملف غير متاح' });
@@ -315,22 +551,53 @@ app.get('/api/files/:id/content', auth, (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
-app.put('/api/files/:id', auth, (req, res) => {
-  const db = getDb();
+app.put('/api/files/:id', auth, async (req, res) => {
+  const db = structuredClone(getDb());
   const file = db.files.find((f) => f.id === req.params.id && f.userId === req.userId);
   if (!file) return res.status(404).json({ error: 'الملف غير موجود' });
-  Object.assign(file, req.body);
-  saveDb(db);
+  if (typeof req.body.favorite === 'boolean') file.favorite = req.body.favorite;
+  for (const field of ['currentPage', 'totalPages']) {
+    if (Number.isFinite(req.body[field])) file[field] = req.body[field];
+  }
+  if (Array.isArray(req.body.timestampNotes)) file.timestampNotes = req.body.timestampNotes;
+  if (typeof req.body.title === 'string') file.title = req.body.title.slice(0, 200);
+  if (Array.isArray(req.body.tags)) {
+    file.tags = req.body.tags.filter((tag) => typeof tag === 'string').slice(0, 20).map((tag) => tag.slice(0, 50));
+  }
+  if (typeof req.body.subjectId === 'string') {
+    const ownsSubject = db.subjects.some((subject) => subject.id === req.body.subjectId && subject.userId === req.userId);
+    if (ownsSubject || !req.body.subjectId) file.subjectId = req.body.subjectId;
+  }
+  try {
+    await saveDbAsync(db);
+  } catch (err) {
+    console.error('File metadata save failed:', err);
+    return res.status(500).json({ error: 'تعذر حفظ بيانات الملف' });
+  }
   res.json(file);
 });
 
-app.delete('/api/files/:id', auth, (req, res) => {
-  const db = getDb();
+app.delete('/api/files/:id', auth, async (req, res) => {
+  const db = structuredClone(getDb());
   const file = db.files.find((f) => f.id === req.params.id && f.userId === req.userId);
   if (!file) return res.status(404).json({ error: 'الملف غير موجود' });
 
+  if (file.storage === 'blob' && file.pathname) {
+    try {
+      await del(file.pathname, BLOB_OPTIONS);
+    } catch (err) {
+      console.error('Blob deletion failed:', err);
+      return res.status(502).json({ error: 'تعذر حذف الملف من التخزين السحابي' });
+    }
+  }
+
   db.files = db.files.filter((f) => f.id !== req.params.id);
-  saveDb(db);
+  try {
+    await saveDbAsync(db);
+  } catch (err) {
+    console.error('File record deletion failed:', err);
+    return res.status(500).json({ error: 'تعذر حذف سجل الملف' });
+  }
   res.json({ success: true });
 });
 

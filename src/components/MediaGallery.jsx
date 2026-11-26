@@ -11,7 +11,7 @@ import {
   Download,
   Maximize2
 } from 'lucide-react';
-import { deleteFile } from '../utils/api';
+import { deleteFile, getFileContentUrl } from '../utils/api';
 
 export default function MediaGallery({ files = [], subjects = [], onFileDeleted }) {
   const [activeImage, setActiveImage] = useState(null);
@@ -90,7 +90,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
             >
               <div className="h-44 bg-slate-950 overflow-hidden relative">
                 <img
-                  src={file.url}
+                  src={getFileContentUrl(file)}
                   alt={file.title}
                   className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                 />
@@ -146,7 +146,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
                 <RotateCw className="w-4 h-4" />
               </button>
               <a
-                href={activeImage.url}
+                href={getFileContentUrl(activeImage)}
                 download
                 target="_blank"
                 rel="noreferrer"
@@ -168,7 +168,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
           {/* Lightbox Image Viewport */}
           <div className="flex-1 overflow-auto flex items-center justify-center p-4">
             <img
-              src={activeImage.url}
+              src={getFileContentUrl(activeImage)}
               alt={activeImage.title}
               style={{
                 transform: `scale(${zoomLevel}) rotate(${rotation}deg)`,

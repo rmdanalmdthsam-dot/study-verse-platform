@@ -1,3 +1,5 @@
+import { uploadPresigned } from '@vercel/blob/client';
+
 const BASE_URL = '';
 
 export function getAuthToken() {
@@ -16,6 +18,12 @@ export function getCurrentUser() {
   } catch {
     return null;
   }
+}
+
+export function getFileContentUrl(file) {
+  if (file.storage !== 'blob') return file.url;
+  const token = encodeURIComponent(getAuthToken() || '');
+  return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
 }
 
 export function setCurrentUser(user) {
@@ -95,6 +103,67 @@ export async function fetchFiles(params = {}) {
 }
 
 export async function uploadFile(formData, onProgress) {
+  const file = formData.get('file');
+  if (!file) throw new Error('لم يتم اختيار ملف');
+
+  if (!import.meta.env.PROD) {
+    return uploadFileToLocalServer(formData, onProgress);
+  }
+
+  const modeResponse = await fetch(`${BASE_URL}/api/files/storage-mode`);
+  if (!modeResponse.ok) throw new Error('تعذر التحقق من إعداد تخزين الملفات');
+  const { blobUploadsEnabled } = await modeResponse.json();
+  if (!blobUploadsEnabled) return uploadFileToLocalServer(formData, onProgress);
+
+  const user = getCurrentUser();
+  const token = getAuthToken();
+  if (!user?.id || !token) throw new Error('تسجيل الدخول مطلوب');
+  if (file.size > 1024 * 1024 * 1024) throw new Error('حجم الملف يتجاوز الحد المسموح (1 جيجابايت)');
+
+  const id = `file_${crypto.randomUUID()}`;
+  const safeName = file.name.replace(/[\\/]/g, '_').replace(/[^a-zA-Z0-9._-]/g, '_').slice(-180) || 'file';
+  const pathname = `users/${user.id}/${crypto.randomUUID()}-${safeName}`;
+  const tags = String(formData.get('tags') || '')
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+  const metadata = {
+    id,
+    originalName: file.name,
+    title: String(formData.get('title') || file.name),
+    subjectId: String(formData.get('subjectId') || ''),
+    tags,
+    size: file.size,
+    contentType: file.type || 'application/octet-stream'
+  };
+
+  try {
+    const blob = await uploadPresigned(pathname, file, {
+      access: 'private',
+      handleUploadUrl: `${BASE_URL}/api/files/upload-presigned`,
+      headers: { Authorization: `Bearer ${token}` },
+      contentType: metadata.contentType,
+      clientPayload: JSON.stringify(metadata),
+      multipart: file.size > 5 * 1024 * 1024,
+      onUploadProgress: (event) => {
+        if (onProgress) onProgress(Math.round(event.percentage));
+      }
+    });
+    const response = await fetch(`${BASE_URL}/api/files/finalize-upload`, {
+      method: 'POST',
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify({ pathname: blob.pathname, metadata })
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'تعذر حفظ بيانات الملف');
+    return result;
+  } catch (error) {
+    throw new Error(error.message || 'تعذر رفع الملف');
+  }
+}
+
+function uploadFileToLocalServer(formData, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${BASE_URL}/api/files/upload`);

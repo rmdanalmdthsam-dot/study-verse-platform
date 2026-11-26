@@ -14,7 +14,7 @@ import {
   StickyNote,
   Send
 } from 'lucide-react';
-import { updateFile, deleteFile, createNote, getAuthToken } from '../utils/api';
+import { updateFile, deleteFile, createNote, getFileContentUrl } from '../utils/api';
 
 export default function PdfReader({ files = [], subjects = [], onFileUpdated, onFileDeleted }) {
   const [selectedPdf, setSelectedPdf] = useState(null);
@@ -22,11 +22,6 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
   const [isSplitNoteOpen, setIsSplitNoteOpen] = useState(true);
 
   const pdfFiles = files.filter((f) => f.type === 'pdf');
-  const getPdfContentUrl = (file) => {
-    const token = encodeURIComponent(getAuthToken() || '');
-    return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
-  };
-
   const handleToggleFavorite = async (file, e) => {
     e.stopPropagation();
     try {
@@ -93,7 +88,7 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
 
           <div className="flex items-center gap-2">
             <a
-              href={getPdfContentUrl(selectedPdf)}
+              href={getFileContentUrl(selectedPdf)}
               target="_blank"
               rel="noreferrer"
               className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
@@ -115,7 +110,7 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
             </button>
 
             <a
-              href={getPdfContentUrl(selectedPdf)}
+              href={getFileContentUrl(selectedPdf)}
               download
               target="_blank"
               rel="noreferrer"
@@ -132,12 +127,12 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
           {/* Main PDF Frame */}
           <div className="flex-1 h-full bg-slate-900 flex flex-col relative">
             <object
-              data={getPdfContentUrl(selectedPdf)}
+              data={getFileContentUrl(selectedPdf)}
               type="application/pdf"
               className="w-full h-full"
             >
               <iframe
-                src={`${getPdfContentUrl(selectedPdf)}#toolbar=1`}
+                src={`${getFileContentUrl(selectedPdf)}#toolbar=1`}
                 title={selectedPdf.title}
                 className="w-full h-full border-none rounded-none"
               />

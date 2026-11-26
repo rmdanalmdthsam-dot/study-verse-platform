@@ -56,4 +56,11 @@
 
 * **الواجهة الأمامية (Frontend):** React 19 + Tailwind CSS + Lucide Icons + PWA Support.
 * **الخادم السحابي (Backend):** Node.js + Express 5 + Multer Media Streaming (Content-Range).
-* **قاعدة البيانات:** Local-First JSON Database مع قابلية التوصيل الفوري مع Supabase / PostgreSQL.
+* **قاعدة البيانات:** Neon PostgreSQL لحفظ الحسابات والبيانات.
+* **تخزين المرفقات:** Vercel Blob خاص؛ يرفع المتصفح الملفات مباشرةً، وتتحقق المنصة من ملكية الحساب عند عرضها أو حذفها.
+
+### حفظ الملفات على Vercel
+
+تحتاج بيئة المشروع على Vercel إلى متغيرات مخزن Blob الخاص: `BLOB_WEBHOOK_PUBLIC_KEY_STORE_ID` و`BLOB_WEBHOOK_PUBLIC_KEY_READ_WRITE_TOKEN` و`BLOB_WEBHOOK_PUBLIC_KEY_WEBHOOK_PUBLIC_KEY`. أضف القيم من إعدادات Vercel فقط ولا تضع الأسرار في ملفات المشروع. الحد الأقصى للملف الواحد في التطبيق هو 1 جيجابايت، وتظل سعة التخزين ونقل البيانات خاضعة لحدود خطة Vercel.
+
+أثناء التطوير المحلي يستخدم التطبيق تخزين الملفات المحلي؛ أما الرفع السحابي فيعمل عند ربط مخزن Blob وإتاحة متغيراته لبيئة التطوير.
