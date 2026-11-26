@@ -1,6 +1,10 @@
 import { uploadPresigned } from '@vercel/blob/client';
 
-const BASE_URL = '';
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+
+function apiUrl(path) {
+  return `${BASE_URL}${path}`;
+}
 
 export function getAuthToken() {
   return localStorage.getItem('study_token');
@@ -21,9 +25,11 @@ export function getCurrentUser() {
 }
 
 export function getFileContentUrl(file) {
-  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
+  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) {
+    return file.url?.startsWith('/') && !file.url.startsWith('//') ? apiUrl(file.url) : file.url;
+  }
   const token = encodeURIComponent(getAuthToken() || '');
-  return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
+  return apiUrl(`/api/files/${encodeURIComponent(file.id)}/content?token=${token}`);
 }
 
 export async function downloadBackup(onProgress) {
@@ -227,7 +233,7 @@ export async function uploadFile(formData, onProgress) {
   try {
     const blob = await uploadPresigned(pathname, file, {
       access: 'private',
-      handleUploadUrl: `${BASE_URL}/api/files/upload-presigned`,
+      handleUploadUrl: apiUrl('/api/files/upload-presigned'),
       headers: { Authorization: `Bearer ${token}` },
       contentType: metadata.contentType,
       clientPayload: JSON.stringify(metadata),
