@@ -437,6 +437,11 @@ if (fs.existsSync(DIST_DIR)) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Study platform server running on port ${PORT}`);
-});
+export { app };
+export default app;
+
+if (process.env.VERCEL !== '1') {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Study platform server running on port ${PORT}`);
+  });
+}
