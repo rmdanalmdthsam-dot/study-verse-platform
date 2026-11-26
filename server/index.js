@@ -26,7 +26,9 @@ app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-const UPLOADS_DIR = path.join(__dirname, 'storage');
+const UPLOADS_DIR = process.env.VERCEL === '1'
+  ? path.join('/tmp', 'study-verse-storage')
+  : path.join(__dirname, 'storage');
 const PDF_DIR = path.join(UPLOADS_DIR, 'pdfs');
 const VIDEO_DIR = path.join(UPLOADS_DIR, 'videos');
 const IMAGE_DIR = path.join(UPLOADS_DIR, 'images');

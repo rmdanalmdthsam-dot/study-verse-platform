@@ -6,7 +6,9 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.VERCEL === '1'
+  ? path.join('/tmp', 'study-verse-data')
+  : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'database.json');
 const SECRET_KEY = process.env.JWT_SECRET || 'study_app_token_secret_key_2026';
 
