@@ -14,12 +14,14 @@ import {
   StickyNote,
   Send
 } from 'lucide-react';
-import { updateFile, deleteFile, createNote, getFileContentUrl } from '../utils/api';
+import { updateFile, deleteFile, createNote } from '../utils/api';
+import useFileContentUrl from '../hooks/useFileContentUrl';
 
 export default function PdfReader({ files = [], subjects = [], onFileUpdated, onFileDeleted }) {
   const [selectedPdf, setSelectedPdf] = useState(null);
   const [noteText, setNoteText] = useState('');
   const [isSplitNoteOpen, setIsSplitNoteOpen] = useState(true);
+  const pdfContentUrl = useFileContentUrl(selectedPdf);
 
   const pdfFiles = files.filter((f) => f.type === 'pdf');
   const handleToggleFavorite = async (file, e) => {
@@ -88,7 +90,7 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
 
           <div className="flex items-center gap-2">
             <a
-              href={getFileContentUrl(selectedPdf)}
+              href={pdfContentUrl || undefined}
               target="_blank"
               rel="noreferrer"
               className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow"
@@ -110,7 +112,7 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
             </button>
 
             <a
-              href={getFileContentUrl(selectedPdf)}
+              href={pdfContentUrl || undefined}
               download
               target="_blank"
               rel="noreferrer"
@@ -127,12 +129,12 @@ export default function PdfReader({ files = [], subjects = [], onFileUpdated, on
           {/* Main PDF Frame */}
           <div className="flex-1 h-full bg-slate-900 flex flex-col relative">
             <object
-              data={getFileContentUrl(selectedPdf)}
+              data={pdfContentUrl || undefined}
               type="application/pdf"
               className="w-full h-full"
             >
               <iframe
-                src={`${getFileContentUrl(selectedPdf)}#toolbar=1`}
+                src={pdfContentUrl ? `${pdfContentUrl}#toolbar=1` : undefined}
                 title={selectedPdf.title}
                 className="w-full h-full border-none rounded-none"
               />

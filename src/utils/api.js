@@ -20,10 +20,15 @@ export function getCurrentUser() {
   }
 }
 
-export function getFileContentUrl(file) {
+export async function getFileContentUrl(file) {
   if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
-  const token = encodeURIComponent(getAuthToken() || '');
-  return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
+  const response = await fetch(`${BASE_URL}/api/files/${encodeURIComponent(file.id)}/access`, {
+    method: 'POST',
+    headers: authHeaders()
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر فتح الملف');
+  return data.url;
 }
 
 export async function downloadBackup(onProgress) {
@@ -62,14 +67,16 @@ export async function downloadBackup(onProgress) {
       const file = files[index];
       let contentUrl;
       if (file.storage === 'blob' || file.url?.startsWith('/uploads/')) {
-        contentUrl = getFileContentUrl(file);
+        contentUrl = `${BASE_URL}/api/files/${encodeURIComponent(file.id)}/content`;
       } else if (file.url?.startsWith('/') && !file.url.startsWith('//')) {
         contentUrl = file.url;
       } else {
         throw new Error(`مسار الملف "${file.title}" غير صالح للنسخ الاحتياطي`);
       }
 
-      const fileResponse = await fetch(contentUrl);
+      const fileResponse = await fetch(contentUrl, {
+        headers: file.storage === 'blob' || file.url?.startsWith('/uploads/') ? authHeaders() : undefined
+      });
       if (!fileResponse.ok || !fileResponse.body) {
         throw new Error(`تعذر تنزيل الملف "${file.title}"؛ لم تكتمل النسخة الاحتياطية`);
       }
@@ -150,9 +157,25 @@ export async function login(email, password) {
   return data;
 }
 
-export function logout() {
+export async function logout() {
+  let revokeError;
+  if (getAuthToken()) {
+    try {
+      const response = await fetch(`${BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        headers: authHeaders()
+      });
+      if (!response.ok) throw new Error('تعذر إنهاء الجلسة على الخادم');
+    } catch (error) {
+      revokeError = error;
+    }
+  }
   setAuthToken(null);
   setCurrentUser(null);
+  if (revokeError) {
+    console.error('Server-side logout failed:', revokeError);
+    window.alert('تم تسجيل الخروج من هذا الجهاز، لكن تعذر إبطال الجلسة على الخادم. أعد المحاولة عند توفر الاتصال.');
+  }
   window.location.reload();
 }
 

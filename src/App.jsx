@@ -71,7 +71,7 @@ export default function App() {
   };
 
   const handleLogout = () => {
-    logout();
+    return logout();
   };
 
   const handleBackup = async () => {

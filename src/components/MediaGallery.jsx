@@ -11,12 +11,25 @@ import {
   Download,
   Maximize2
 } from 'lucide-react';
-import { deleteFile, getFileContentUrl } from '../utils/api';
+import { deleteFile } from '../utils/api';
+import useFileContentUrl from '../hooks/useFileContentUrl';
+
+function GalleryThumbnail({ file }) {
+  const contentUrl = useFileContentUrl(file);
+  return (
+    <img
+      src={contentUrl || undefined}
+      alt={file.title}
+      className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
+    />
+  );
+}
 
 export default function MediaGallery({ files = [], subjects = [], onFileDeleted }) {
   const [activeImage, setActiveImage] = useState(null);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [rotation, setRotation] = useState(0);
+  const activeImageUrl = useFileContentUrl(activeImage);
 
   const imageFiles = files.filter((f) => f.type === 'image');
 
@@ -89,11 +102,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
               className="group relative bg-slate-900/80 hover:bg-slate-800 border border-slate-800 hover:border-sky-500/50 rounded-2xl overflow-hidden cursor-pointer shadow-lg shadow-black/20 transition flex flex-col"
             >
               <div className="h-44 bg-slate-950 overflow-hidden relative">
-                <img
-                  src={getFileContentUrl(file)}
-                  alt={file.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
-                />
+                <GalleryThumbnail file={file} />
                 <button
                   onClick={(e) => handleDelete(file, e)}
                   className="absolute top-2 left-2 p-1.5 bg-black/60 hover:bg-rose-500 text-white rounded-lg transition"
@@ -146,7 +155,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
                 <RotateCw className="w-4 h-4" />
               </button>
               <a
-                href={getFileContentUrl(activeImage)}
+                href={activeImageUrl || undefined}
                 download
                 target="_blank"
                 rel="noreferrer"
@@ -168,7 +177,7 @@ export default function MediaGallery({ files = [], subjects = [], onFileDeleted 
           {/* Lightbox Image Viewport */}
           <div className="flex-1 overflow-auto flex items-center justify-center p-4">
             <img
-              src={getFileContentUrl(activeImage)}
+              src={activeImageUrl || undefined}
               alt={activeImage.title}
               style={{
                 transform: `scale(${zoomLevel}) rotate(${rotation}deg)`,

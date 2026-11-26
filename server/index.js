@@ -5,7 +5,6 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import QRCode from 'qrcode';
-import { randomUUID } from 'crypto';
 import { Readable } from 'stream';
 import { del, get, head, issueSignedToken } from '@vercel/blob';
 import { handleUploadPresigned } from '@vercel/blob/client';
@@ -17,7 +16,9 @@ import {
   hashPassword,
   verifyPassword,
   createToken,
-  verifyToken,
+  getTokenClaims,
+  createMediaToken,
+  getMediaTokenClaims,
   initUserStarterData,
   loadCloudDb
 } from './db.js';
@@ -80,21 +81,6 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage, limits: { fileSize: 1024 * 1024 * 1024 } });
 
-app.use('/uploads', (req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  next();
-}, express.static(UPLOADS_DIR, {
-  acceptRanges: true,
-  etag: true,
-  setHeaders: (res, filePath) => {
-    if (filePath.endsWith('.pdf')) {
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', 'inline');
-    }
-  }
-}));
-
 function getLocalIp() {
   const nets = os.networkInterfaces();
   const candidates = [];
@@ -117,26 +103,97 @@ function getLocalIp() {
 
 function auth(req, res, next) {
   const header = req.headers.authorization;
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
-  if ((!header || !header.startsWith('Bearer ')) && !queryToken) {
+  if (!header || !header.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'تسجيل الدخول مطلوب' });
   }
-  const token = header && header.startsWith('Bearer ') ? header.slice(7).trim() : queryToken;
-  const userId = verifyToken(token);
-  if (!userId) {
+  const token = header.slice(7).trim();
+  const claims = getTokenClaims(token);
+  if (!claims || isTokenRevoked(claims.jti)) {
     return res.status(401).json({ error: 'الجلسة منتهية، يرجى تسجيل الدخول مجدداً' });
   }
-  req.userId = userId;
+  req.userId = claims.userId;
+  req.tokenId = claims.jti;
+  req.tokenExpiration = claims.exp;
   next();
+}
+
+function isTokenRevoked(tokenId) {
+  const db = getDb();
+  const revokedTokens = Array.isArray(db.revokedTokens) ? db.revokedTokens : [];
+  const activeTokens = revokedTokens.filter((token) => token.exp > Date.now());
+  if (activeTokens.length !== revokedTokens.length) {
+    db.revokedTokens = activeTokens;
+    saveDb(db);
+  }
+  return activeTokens.some((token) => token.jti === tokenId);
 }
 
 function getRequestUserId(req) {
   const header = req.headers.authorization;
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
-  const token = header && header.startsWith('Bearer ')
-    ? header.slice(7).trim()
-    : queryToken;
-  return verifyToken(token);
+  if (!header || !header.startsWith('Bearer ')) return null;
+  const claims = getTokenClaims(header.slice(7).trim());
+  return claims && !isTokenRevoked(claims.jti) ? claims.userId : null;
+}
+
+function getCookie(req, name) {
+  const cookieHeader = req.headers.cookie || '';
+  for (const cookie of cookieHeader.split(';')) {
+    const separator = cookie.indexOf('=');
+    if (separator < 0 || cookie.slice(0, separator).trim() !== name) continue;
+    return cookie.slice(separator + 1).trim();
+  }
+  return '';
+}
+
+function getContentMetadata(file, fallbackMimeType = '') {
+  const filename = file.originalName || file.title || 'file';
+  const extension = path.extname(filename).toLowerCase();
+  const safeFilename = encodeURIComponent(filename).replace(/['()*]/g, (char) =>
+    `%${char.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  const extensionTypes = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.avif': 'image/avif',
+    '.bmp': 'image/bmp',
+    '.mp4': 'video/mp4',
+    '.m4v': 'video/mp4',
+    '.webm': 'video/webm',
+    '.ogv': 'video/ogg',
+    '.mov': 'video/quicktime',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.wav': 'audio/wav',
+    '.ogg': 'audio/ogg',
+    '.flac': 'audio/flac'
+  };
+  const declaredType = String(file.mimeType || fallbackMimeType || '').toLowerCase().split(';')[0].trim();
+  const mimeType = declaredType || extensionTypes[extension] || '';
+  const activeExtensions = new Set(['.html', '.htm', '.xhtml', '.svg', '.xml', '.js', '.mjs', '.cjs', '.css']);
+  const activeMimeTypes = new Set([
+    'text/html',
+    'application/xhtml+xml',
+    'image/svg+xml',
+    'application/javascript',
+    'text/javascript'
+  ]);
+  if (activeExtensions.has(extension) || activeMimeTypes.has(mimeType)) {
+    return { contentType: 'application/octet-stream', disposition: 'attachment', filename: safeFilename };
+  }
+  if (file.type === 'pdf') {
+    return { contentType: 'application/pdf', disposition: 'inline', filename: safeFilename };
+  }
+  const isSafeMedia = (file.type === 'image' && mimeType.startsWith('image/') && mimeType !== 'image/svg+xml') ||
+    (file.type === 'video' && mimeType.startsWith('video/')) ||
+    (file.type === 'audio' && mimeType.startsWith('audio/'));
+  if (isSafeMedia) {
+    return { contentType: mimeType, disposition: 'inline', filename: safeFilename };
+  }
+  return { contentType: 'application/octet-stream', disposition: 'attachment', filename: safeFilename };
 }
 
 function classifyFile(originalName, mimeType = '') {
@@ -293,12 +350,32 @@ app.get('/api/auth/me', auth, (req, res) => {
   res.json({ id: user.id, name: user.name, email: user.email });
 });
 
+app.post('/api/auth/logout', auth, async (req, res) => {
+  const db = structuredClone(getDb());
+  db.revokedTokens = (db.revokedTokens || []).filter((token) => token.exp > Date.now());
+  if (!db.revokedTokens.some((token) => token.jti === req.tokenId)) {
+    db.revokedTokens.push({ jti: req.tokenId, exp: req.tokenExpiration });
+  }
+  await saveDbAsync(db);
+  res.json({ success: true });
+});
+
 // Sync & Device Pairing
 app.get('/api/sync/info', async (req, res) => {
   const localIp = getLocalIp();
-  const reqHost = req.headers.host || '';
-  const port = reqHost.includes(':') ? reqHost.split(':')[1] : PORT;
-  const phoneUrl = `http://${localIp}:${port}`;
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0].trim().toLowerCase();
+  const host = req.headers['x-forwarded-host'] || req.headers.host || '';
+  const isHttps = req.secure || forwardedProto === 'https' || process.env.VERCEL === '1';
+  const phoneUrl = isHttps && host ? `https://${host}` : null;
+  if (!phoneUrl) {
+    return res.json({
+      localIp,
+      phoneUrl: null,
+      qrCodeDataUrl: null,
+      error: 'يجب فتح المنصة عبر HTTPS لإنشاء رمز ربط آمن'
+    });
+  }
   try {
     const qrCodeDataUrl = await QRCode.toDataURL(phoneUrl, { margin: 2, scale: 7 });
     res.json({ localIp, phoneUrl, qrCodeDataUrl });
@@ -417,6 +494,7 @@ app.post('/api/files/upload', auth, upload.single('file'), (req, res) => {
     title: title || req.file.originalname,
     filename: req.file.filename,
     originalName: req.file.originalname,
+    mimeType: req.file.mimetype,
     type,
     subjectId: subjectId || '',
     size: req.file.size,
@@ -500,10 +578,33 @@ app.post('/api/files/finalize-upload', auth, async (req, res) => {
   }
 });
 
-app.get('/api/files/:id/content', auth, async (req, res) => {
-  const db = getDb();
-  const file = db.files.find((item) => item.id === req.params.id && item.userId === req.userId);
+app.post('/api/files/:id/access', auth, (req, res) => {
+  const file = getDb().files.find((item) => item.id === req.params.id && item.userId === req.userId);
   if (!file) return res.status(404).json({ error: 'الملف غير موجود' });
+
+  const token = createMediaToken(req.userId, file.id, req.tokenId);
+  const cookiePath = `/api/files/${encodeURIComponent(file.id)}/content`;
+  const secure = process.env.VERCEL === '1' || req.secure;
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Set-Cookie', `media_access=${token}; Max-Age=900; Path=${cookiePath}; HttpOnly; SameSite=Strict${secure ? '; Secure' : ''}`);
+  res.json({ url: cookiePath });
+});
+
+app.get('/api/files/:id/content', async (req, res) => {
+  const bearerUserId = getRequestUserId(req);
+  const mediaClaims = getMediaTokenClaims(getCookie(req, 'media_access'), req.params.id);
+  const mediaUserId = mediaClaims && !isTokenRevoked(mediaClaims.sessionId) ? mediaClaims.userId : null;
+  const userId = bearerUserId || mediaUserId;
+  if (!userId) return res.status(401).json({ error: 'تسجيل الدخول مطلوب' });
+
+  const db = getDb();
+  const file = db.files.find((item) => item.id === req.params.id && item.userId === userId);
+  if (!file) return res.status(404).json({ error: 'الملف غير موجود' });
+
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Accept-Ranges', 'bytes');
 
   if (file.storage === 'blob' && file.pathname) {
     try {
@@ -536,11 +637,10 @@ app.get('/api/files/:id/content', auth, async (req, res) => {
 
       const contentRange = blob.headers.get('content-range');
       const contentLength = blob.headers.get('content-length');
+      const metadata = getContentMetadata(file, blob.blob.contentType);
       res.status(contentRange ? 206 : 200);
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      res.setHeader('Content-Type', file.type === 'pdf' ? 'application/pdf' : (file.mimeType || blob.blob.contentType));
-      res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || file.title || 'file')}`);
+      res.setHeader('Content-Type', metadata.contentType);
+      res.setHeader('Content-Disposition', `${metadata.disposition}; filename*=UTF-8''${metadata.filename}`);
       if (contentRange) res.setHeader('Content-Range', contentRange);
       if (contentLength) res.setHeader('Content-Length', contentLength);
       return Readable.fromWeb(blob.stream).pipe(res);
@@ -558,32 +658,27 @@ app.get('/api/files/:id/content', auth, async (req, res) => {
 
   const stat = fs.statSync(filePath);
   const range = req.headers.range;
-  res.setHeader('Accept-Ranges', 'bytes');
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-
-  if (file.type === 'pdf') {
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(file.originalName || file.title || 'document.pdf')}`);
-  } else if (['image', 'video', 'audio'].includes(file.type)) {
-    res.type(file.mimeType || path.extname(file.originalName || relativeUrl) || 'application/octet-stream');
-  } else {
-    res.setHeader('Content-Type', 'application/octet-stream');
-  }
+  const metadata = getContentMetadata(file, file.mimeType);
+  res.setHeader('Content-Type', metadata.contentType);
+  res.setHeader('Content-Disposition', `${metadata.disposition}; filename*=UTF-8''${metadata.filename}`);
 
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-    if (match) {
-      const start = match[1] ? Number(match[1]) : 0;
-      const end = match[2] ? Number(match[2]) : stat.size - 1;
-      if (start < 0 || end >= stat.size || start > end) {
-        res.setHeader('Content-Range', `bytes */${stat.size}`);
-        return res.status(416).end();
-      }
-      res.status(206);
-      res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
-      res.setHeader('Content-Length', end - start + 1);
-      return fs.createReadStream(filePath, { start, end }).pipe(res);
+    if (!match || (!match[1] && !match[2]) || stat.size <= 0) {
+      res.setHeader('Content-Range', `bytes */${stat.size}`);
+      return res.status(416).end();
     }
+    const suffixLength = Number(match[2]);
+    const start = match[1] ? Number(match[1]) : Math.max(stat.size - suffixLength, 0);
+    const end = match[1] && match[2] ? Number(match[2]) : stat.size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start >= stat.size || end >= stat.size || start > end) {
+      res.setHeader('Content-Range', `bytes */${stat.size}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+    res.setHeader('Content-Length', end - start + 1);
+    return fs.createReadStream(filePath, { start, end }).pipe(res);
   }
 
   res.setHeader('Content-Length', stat.size);

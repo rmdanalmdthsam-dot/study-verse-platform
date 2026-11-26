@@ -9,6 +9,7 @@
     "client": "vite",
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test",
     "lint": "oxlint",
     "preview": "vite preview"
   },

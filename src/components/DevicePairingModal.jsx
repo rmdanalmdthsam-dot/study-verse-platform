@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
-import { Smartphone, Laptop, QrCode, Wifi, Cloud, Check, Copy, X, ExternalLink } from 'lucide-react';
+import { Smartphone, QrCode, Wifi, Cloud, Check, Copy, X } from 'lucide-react';
 
 export default function DevicePairingModal({ isOpen, onClose, syncInfo }) {
   const [copied, setCopied] = useState(false);
 
   if (!isOpen) return null;
 
-  const phoneUrl = syncInfo?.phoneUrl || 'http://localhost:5173';
+  const phoneUrl = syncInfo?.phoneUrl || '';
   const qrCode = syncInfo?.qrCodeDataUrl;
   const localIp = syncInfo?.localIp || '192.168.x.x';
 
   const handleCopy = () => {
+    if (!phoneUrl) return;
     navigator.clipboard.writeText(phoneUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
@@ -51,12 +52,13 @@ export default function DevicePairingModal({ isOpen, onClose, syncInfo }) {
                 <img src={qrCode} alt="Phone QR Code" className="w-48 h-48 rounded-lg object-contain" />
               </div>
             ) : (
-              <div className="w-48 h-48 bg-slate-800 animate-pulse rounded-xl flex items-center justify-center text-slate-500 mb-3">
-                <QrCode className="w-12 h-12" />
+              <div className="w-48 h-48 p-4 bg-slate-800 rounded-xl flex flex-col items-center justify-center gap-3 text-slate-300 mb-3">
+                <QrCode className="w-12 h-12 text-slate-500" />
+                <span className="text-xs leading-relaxed">{syncInfo?.error || 'جارٍ تجهيز رمز الربط الآمن'}</span>
               </div>
             )}
             <p className="text-sm font-semibold text-indigo-300 flex items-center gap-1.5">
-              <QrCode className="w-4 h-4" /> امسح الكود بكاميرا الموبايل لفتح المنصة فوراً
+              <QrCode className="w-4 h-4" /> {phoneUrl ? 'امسح الكود بكاميرا الموبايل لفتح المنصة فوراً' : 'يتطلب الربط الآمن فتح المنصة عبر HTTPS'}
             </p>
           </div>
 
@@ -74,7 +76,8 @@ export default function DevicePairingModal({ isOpen, onClose, syncInfo }) {
               />
               <button
                 onClick={handleCopy}
-                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition shrink-0"
+                disabled={!phoneUrl}
+                className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition shrink-0"
               >
                 {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                 {copied ? 'تم النسخ' : 'نسخ'}

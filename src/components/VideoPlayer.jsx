@@ -16,13 +16,15 @@ import {
   Bookmark,
   Share2
 } from 'lucide-react';
-import { updateFile, deleteFile, getFileContentUrl } from '../utils/api';
+import { updateFile, deleteFile } from '../utils/api';
+import useFileContentUrl from '../hooks/useFileContentUrl';
 
 export default function VideoPlayer({ files = [], subjects = [], onFileUpdated, onFileDeleted }) {
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [timestampNote, setTimestampNote] = useState('');
   const [currentTime, setCurrentTime] = useState(0);
+  const videoContentUrl = useFileContentUrl(selectedVideo);
 
   const videoRef = useRef(null);
   const videoFiles = files.filter((f) => f.type === 'video');
@@ -135,7 +137,7 @@ export default function VideoPlayer({ files = [], subjects = [], onFileUpdated, 
           <div className="flex-1 bg-black flex flex-col items-center justify-center relative">
             <video
               ref={videoRef}
-              src={getFileContentUrl(selectedVideo)}
+              src={videoContentUrl || undefined}
               controls
               onTimeUpdate={handleTimeUpdate}
               className="w-full h-full max-h-[70vh] object-contain"
