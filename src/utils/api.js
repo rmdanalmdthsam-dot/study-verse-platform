@@ -21,9 +21,95 @@ export function getCurrentUser() {
 }
 
 export function getFileContentUrl(file) {
-  if (file.storage !== 'blob') return file.url;
+  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
   const token = encodeURIComponent(getAuthToken() || '');
   return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
+}
+
+export async function downloadBackup(onProgress) {
+  let fileHandle = null;
+  if (typeof window.showSaveFilePicker === 'function') {
+    fileHandle = await window.showSaveFilePicker({
+      suggestedName: `studyverse-backup-${new Date().toISOString().slice(0, 10)}.zip`,
+      types: [{ description: 'ZIP backup', accept: { 'application/zip': ['.zip'] } }]
+    });
+  }
+
+  const response = await fetch(`${BASE_URL}/api/backup/manifest`, { headers: authHeaders() });
+  const manifest = await response.json();
+  if (!response.ok) throw new Error(manifest.error || 'تعذر تجهيز بيانات النسخة الاحتياطية');
+
+  const files = Array.isArray(manifest.files) ? manifest.files : [];
+  const totalBytes = files.reduce((total, file) => total + (Number(file.size) || 0), 0);
+  if (!fileHandle && totalBytes > 100 * 1024 * 1024) {
+    throw new Error('النسخة كبيرة للتنزيل على هذا المتصفح. افتح المنصة باستخدام Chrome أو Edge على الكمبيوتر.');
+  }
+
+  const { BlobWriter, ZipWriter } = await import('@zip.js/zip.js');
+  const blobWriter = fileHandle ? null : new BlobWriter('application/zip');
+  const output = fileHandle ? await fileHandle.createWritable() : blobWriter;
+  const zipWriter = new ZipWriter(output, { level: 0 });
+  let downloadedBytes = 0;
+  const backupFiles = [];
+
+  const safePathPart = (value) => String(value || 'file')
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\.\./g, '_')
+    .slice(0, 180) || 'file';
+
+  try {
+    for (let index = 0; index < files.length; index += 1) {
+      const file = files[index];
+      let contentUrl;
+      if (file.storage === 'blob' || file.url?.startsWith('/uploads/')) {
+        contentUrl = getFileContentUrl(file);
+      } else if (file.url?.startsWith('/') && !file.url.startsWith('//')) {
+        contentUrl = file.url;
+      } else {
+        throw new Error(`مسار الملف "${file.title}" غير صالح للنسخ الاحتياطي`);
+      }
+
+      const fileResponse = await fetch(contentUrl);
+      if (!fileResponse.ok || !fileResponse.body) {
+        throw new Error(`تعذر تنزيل الملف "${file.title}"؛ لم تكتمل النسخة الاحتياطية`);
+      }
+
+      const archivePath = `files/${safePathPart(file.id)}/${safePathPart(file.originalName || file.title)}`;
+      const trackedBody = fileResponse.body.pipeThrough(new TransformStream({
+        transform(chunk, controller) {
+          downloadedBytes += chunk.byteLength;
+          if (onProgress && totalBytes) {
+            onProgress(Math.min(99, Math.floor((downloadedBytes / totalBytes) * 100)));
+          }
+          controller.enqueue(chunk);
+        }
+      }));
+
+      await zipWriter.add(archivePath, trackedBody, { level: 0 });
+      backupFiles.push({ ...file, archivePath });
+      if (onProgress && !totalBytes) onProgress(Math.floor(((index + 1) / Math.max(files.length, 1)) * 99));
+    }
+
+    const backupManifest = { ...manifest, files: backupFiles };
+    await zipWriter.add('backup.json', new Blob([JSON.stringify(backupManifest, null, 2)]).stream(), { level: 0 });
+    await zipWriter.close();
+
+    if (blobWriter) {
+      const archive = await blobWriter.getData();
+      const downloadUrl = URL.createObjectURL(archive);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = `studyverse-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 1000);
+    }
+    if (onProgress) onProgress(100);
+  } catch (error) {
+    if (fileHandle && output && typeof output.abort === 'function') {
+      await output.abort(error).catch(() => {});
+    }
+    throw error;
+  }
 }
 
 export function setCurrentUser(user) {

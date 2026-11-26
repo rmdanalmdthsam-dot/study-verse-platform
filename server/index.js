@@ -360,6 +360,43 @@ app.get('/api/files/storage-mode', (req, res) => {
   });
 });
 
+app.get('/api/backup/manifest', auth, (req, res) => {
+  const db = getDb();
+  const user = db.users.find((item) => item.id === req.userId);
+  if (!user) return res.status(404).json({ error: 'المستخدم غير موجود' });
+  res.setHeader('Cache-Control', 'private, no-store');
+
+  const files = db.files
+    .filter((file) => file.userId === req.userId)
+    .map((file) => ({
+      id: file.id,
+      title: file.title,
+      originalName: file.originalName,
+      type: file.type,
+      subjectId: file.subjectId,
+      size: file.size,
+      tags: file.tags || [],
+      timestampNotes: file.timestampNotes || [],
+      favorite: file.favorite || false,
+      currentPage: file.currentPage,
+      totalPages: file.totalPages,
+      createdAt: file.createdAt,
+      storage: file.storage || 'local',
+      url: file.url
+    }));
+
+  res.json({
+    formatVersion: 1,
+    exportedAt: new Date().toISOString(),
+    user: { id: user.id, name: user.name, email: user.email },
+    subjects: db.subjects.filter((item) => item.userId === req.userId),
+    files,
+    notes: db.notes.filter((item) => item.userId === req.userId),
+    flashcards: db.flashcards.filter((item) => item.userId === req.userId),
+    pomodoroSessions: db.pomodoroSessions.filter((item) => item.userId === req.userId)
+  });
+});
+
 app.post('/api/files/upload', auth, upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'لم يتم اختيار ملف' });
   const { title, subjectId, tags } = req.body;

@@ -21,7 +21,8 @@ import {
   fetchSubjects,
   fetchNotes,
   fetchFlashcards,
-  fetchSyncInfo
+  fetchSyncInfo,
+  downloadBackup
 } from './utils/api';
 
 export default function App() {
@@ -37,6 +38,7 @@ export default function App() {
 
   const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [isPairingOpen, setIsPairingOpen] = useState(false);
+  const [backupProgress, setBackupProgress] = useState(null);
 
   useEffect(() => {
     if (currentUser && getAuthToken()) {
@@ -72,6 +74,19 @@ export default function App() {
     logout();
   };
 
+  const handleBackup = async () => {
+    setBackupProgress(0);
+    try {
+      await downloadBackup(setBackupProgress);
+    } catch (err) {
+      if (err.name !== 'AbortError') {
+        alert(err.message || 'تعذر إنشاء النسخة الاحتياطية');
+      }
+    } finally {
+      setBackupProgress(null);
+    }
+  };
+
   // If not authenticated, require login/signup
   if (!currentUser || !getAuthToken()) {
     return <AuthModal onLoginSuccess={handleLoginSuccess} />;
@@ -102,6 +117,9 @@ export default function App() {
         onOpenPairing={() => setIsPairingOpen(true)}
         currentUser={currentUser}
         onLogout={handleLogout}
+        onBackup={handleBackup}
+        isBackingUp={backupProgress !== null}
+        backupProgress={backupProgress || 0}
       />
 
       <div className="flex-1 flex max-w-7xl w-full mx-auto">

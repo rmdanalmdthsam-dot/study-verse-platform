@@ -1,5 +1,5 @@
 import React from 'react';
-import { Smartphone, Upload, Search, BookOpen, LogOut, User } from 'lucide-react';
+import { Smartphone, Upload, Search, BookOpen, LogOut, User, Download } from 'lucide-react';
 
 export default function Navbar({
   searchTerm,
@@ -7,7 +7,10 @@ export default function Navbar({
   onOpenUpload,
   onOpenPairing,
   currentUser,
-  onLogout
+  onLogout,
+  onBackup,
+  isBackingUp,
+  backupProgress
 }) {
   return (
     <header className="sticky top-0 z-30 bg-slate-900/90 backdrop-blur-md border-b border-slate-800/80 px-4 lg:px-8 py-3 transition-all">
@@ -50,6 +53,16 @@ export default function Navbar({
             <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-800/60 border border-slate-700/60 rounded-xl text-xs">
               <User className="w-3.5 h-3.5 text-indigo-400" />
               <span className="font-bold text-white max-w-[100px] truncate">{currentUser.name}</span>
+              <button
+                onClick={onBackup}
+                disabled={isBackingUp}
+                title={isBackingUp ? `جارٍ تجهيز النسخة الاحتياطية ${backupProgress}%` : 'تنزيل نسخة احتياطية كاملة'}
+                aria-label={isBackingUp ? `جارٍ تجهيز النسخة الاحتياطية ${backupProgress}%` : 'تنزيل نسخة احتياطية كاملة'}
+                className="p-1 text-slate-400 hover:text-indigo-300 disabled:opacity-50 rounded transition flex items-center gap-1"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span className="hidden lg:inline text-[10px]">{isBackingUp ? `${backupProgress}%` : 'نسخة'}</span>
+              </button>
               <button
                 onClick={onLogout}
                 title="تسجيل خروج"
