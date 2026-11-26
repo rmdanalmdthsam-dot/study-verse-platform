@@ -5,6 +5,10 @@ if (import.meta.env.PROD && BASE_URL && !BASE_URL.startsWith('https://')) {
   throw new Error('VITE_API_BASE_URL must use HTTPS in production');
 }
 
+function apiUrl(path) {
+  return `${BASE_URL}${path}`;
+}
+
 export function getAuthToken() {
   return localStorage.getItem('study_token');
 }
@@ -24,15 +28,17 @@ export function getCurrentUser() {
 }
 
 export async function getFileContentUrl(file) {
-  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
-  const response = await fetch(`${BASE_URL}/api/files/${encodeURIComponent(file.id)}/access`, {
+  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) {
+    return file.url?.startsWith('/') && !file.url.startsWith('//') ? apiUrl(file.url) : file.url;
+  }
+  const response = await fetch(apiUrl(`/api/files/${encodeURIComponent(file.id)}/access`), {
     method: 'POST',
     headers: authHeaders(),
     credentials: 'include'
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'تعذر فتح الملف');
-  return `${BASE_URL}${data.url}`;
+  return apiUrl(data.url);
 }
 
 export function getDownloadUrl(contentUrl) {
@@ -262,7 +268,7 @@ export async function uploadFile(formData, onProgress) {
   try {
     const blob = await uploadPresigned(pathname, file, {
       access: 'private',
-      handleUploadUrl: `${BASE_URL}/api/files/upload-presigned`,
+      handleUploadUrl: apiUrl('/api/files/upload-presigned'),
       headers: { Authorization: `Bearer ${token}` },
       contentType: metadata.contentType,
       clientPayload: JSON.stringify(metadata),
