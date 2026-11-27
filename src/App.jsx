@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Analytics } from '@vercel/analytics/react';
 import Navbar from './components/Navbar';
 import Sidebar from './components/Sidebar';
 import MobileNav from './components/MobileNav';
@@ -218,6 +219,8 @@ export default function App() {
         onClose={() => setIsPairingOpen(false)}
         syncInfo={syncInfo}
       />
+
+      <Analytics />
     </div>
   );
 }
