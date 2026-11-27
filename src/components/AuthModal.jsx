@@ -185,35 +185,46 @@ export default function AuthModal({ onLoginSuccess }) {
           </button>
         </form>
 
-        {(providers.google || providers.facebook) && (
-          <>
-            <div className="flex items-center gap-3 my-5 text-[10px] text-slate-500">
-              <span className="h-px flex-1 bg-slate-800" />
-              أو سجل الدخول باستخدام
-              <span className="h-px flex-1 bg-slate-800" />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {providers.google && (
-                <a
-                  href={getOAuthStartUrl('google')}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition hover:border-indigo-500"
-                >
-                  <span className="font-black text-base text-blue-400">G</span>
-                  Google
-                </a>
-              )}
-              {providers.facebook && (
-                <a
-                  href={getOAuthStartUrl('facebook')}
-                  className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition hover:border-indigo-500"
-                >
-                  <span className="text-base font-black text-blue-500">f</span>
-                  Facebook
-                </a>
-              )}
-            </div>
-          </>
-        )}
+        <>
+          <div className="flex items-center gap-3 my-5 text-[10px] text-slate-500">
+            <span className="h-px flex-1 bg-slate-800" />
+            أو سجل الدخول باستخدام
+            <span className="h-px flex-1 bg-slate-800" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              disabled={!providers.google || loading}
+              onClick={() => window.location.assign(getOAuthStartUrl('google'))}
+              title={providers.google ? undefined : 'تسجيل الدخول عبر Google غير مفعّل بعد'}
+              className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition enabled:hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="font-black text-base text-blue-400">G</span>
+              <span className="text-center leading-tight">
+                Google
+                {!providers.google && <span className="block text-[9px] text-slate-500">غير مفعّل</span>}
+              </span>
+            </button>
+            <button
+              type="button"
+              disabled={!providers.facebook || loading}
+              onClick={() => window.location.assign(getOAuthStartUrl('facebook'))}
+              title={providers.facebook ? undefined : 'تسجيل الدخول عبر Facebook غير مفعّل بعد'}
+              className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition enabled:hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="text-base font-black text-blue-500">f</span>
+              <span className="text-center leading-tight">
+                Facebook
+                {!providers.facebook && <span className="block text-[9px] text-slate-500">غير مفعّل</span>}
+              </span>
+            </button>
+          </div>
+          {(!providers.google || !providers.facebook) && (
+            <p className="mt-2 text-center text-[10px] text-slate-500">
+              خيارات الدخول الاجتماعي غير مفعّلة حالياً
+            </p>
+          )}
+        </>
 
         <div className="mt-6 pt-4 border-t border-slate-800 text-center">
           <p className="text-[11px] text-slate-400">
