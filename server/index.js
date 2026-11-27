@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -15,10 +16,12 @@ import {
   saveDbAsync,
   hashPassword,
   verifyPassword,
+  normalizeEmail,
   createToken,
   getTokenClaims,
   createMediaToken,
   getMediaTokenClaims,
+  consumeOAuthHandoff,
   initUserStarterData,
   loadCloudDb
 } from './db.js';
@@ -321,23 +324,338 @@ async function saveBlobFile(metadata, blob) {
   return newFile;
 }
 
+function getOAuthSettings(provider) {
+  const isGoogle = provider === 'google';
+  const clientId = (process.env[isGoogle ? 'GOOGLE_CLIENT_ID' : 'FACEBOOK_APP_ID'] || '').trim();
+  const clientSecret = (process.env[isGoogle ? 'GOOGLE_CLIENT_SECRET' : 'FACEBOOK_APP_SECRET'] || '').trim();
+  const callbackBaseUrl = (process.env.AUTH_CALLBACK_BASE_URL || '').trim();
+  const publicAppUrl = (process.env.PUBLIC_APP_URL || '').trim();
+  if (!clientId || !clientSecret || !callbackBaseUrl || !publicAppUrl) return null;
+
+  try {
+    const callbackBase = new URL(callbackBaseUrl);
+    const appUrl = new URL(publicAppUrl);
+    const validBase = (url) =>
+      ['https:', ...(process.env.NODE_ENV === 'production' ? [] : ['http:'])].includes(url.protocol) &&
+      !url.username && !url.password && url.pathname === '/' && !url.search && !url.hash;
+    if (!validBase(callbackBase) || !validBase(appUrl)) return null;
+
+    return {
+      clientId,
+      clientSecret,
+      callbackUrl: new URL(`/api/auth/${provider}/callback`, callbackBase).toString(),
+      appUrl: appUrl.origin
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isSecureRequest(req) {
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0].trim().toLowerCase();
+  return process.env.VERCEL === '1' || req.secure || forwardedProto === 'https';
+}
+
+function isTrustedOAuthOrigin(req) {
+  const origin = req.get('origin');
+  if (!origin || trustedOrigins.has(origin)) return true;
+  try {
+    const parsedOrigin = new URL(origin);
+    if (parsedOrigin.origin !== origin) return false;
+    for (const configuredUrl of [process.env.PUBLIC_APP_URL, process.env.AUTH_CALLBACK_BASE_URL]) {
+      if (configuredUrl && new URL(configuredUrl).origin === origin) return true;
+    }
+
+    const forwardedHost = String(req.headers['x-forwarded-host'] || '').split(',')[0].trim();
+    const host = forwardedHost || req.get('host');
+    const protocol = isSecureRequest(req) ? 'https:' : 'http:';
+    return parsedOrigin.protocol === protocol && parsedOrigin.host === host;
+  } catch {
+    return false;
+  }
+}
+
+function serializeCookie(name, value, attributes) {
+  return `${name}=${encodeURIComponent(value)}; ${attributes.join('; ')}`;
+}
+
+function readCookie(req, name) {
+  const cookieHeader = req.headers.cookie || '';
+  for (const entry of cookieHeader.split(';')) {
+    const separator = entry.indexOf('=');
+    if (separator < 0 || entry.slice(0, separator).trim() !== name) continue;
+    try {
+      return decodeURIComponent(entry.slice(separator + 1).trim());
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function clearCookie(name, cookiePath, secure) {
+  return serializeCookie(name, '', [
+    'Max-Age=0',
+    `Path=${cookiePath}`,
+    'HttpOnly',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+    ...(secure ? ['Secure'] : [])
+  ]);
+}
+
+function redirectOAuthError(res, settings, error) {
+  const destination = new URL(settings.appUrl);
+  destination.hash = `oauth_error=${encodeURIComponent(error)}`;
+  res.setHeader('Cache-Control', 'no-store');
+  return res.redirect(destination.toString());
+}
+
+async function fetchOAuthJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    signal: AbortSignal.timeout(10000)
+  });
+  let data;
+  try {
+    data = await response.json();
+  } catch {
+    throw new Error('Invalid OAuth response');
+  }
+  if (!response.ok || !data || typeof data !== 'object') {
+    throw new Error('OAuth provider request failed');
+  }
+  return data;
+}
+
+async function fetchOAuthProfile(provider, settings, code) {
+  if (provider === 'google') {
+    const tokenBody = new URLSearchParams({
+      code,
+      client_id: settings.clientId,
+      client_secret: settings.clientSecret,
+      redirect_uri: settings.callbackUrl,
+      grant_type: 'authorization_code'
+    });
+    const tokens = await fetchOAuthJson('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenBody
+    });
+    if (typeof tokens.access_token !== 'string') throw new Error('OAuth token missing');
+    const profile = await fetchOAuthJson('https://openidconnect.googleapis.com/v1/userinfo', {
+      headers: { Authorization: `Bearer ${tokens.access_token}` }
+    });
+    return {
+      id: profile.sub,
+      name: profile.name,
+      email: profile.email,
+      emailVerified: profile.email_verified === true
+    };
+  }
+
+  const tokenUrl = new URL('https://graph.facebook.com/v22.0/oauth/access_token');
+  tokenUrl.search = new URLSearchParams({
+    client_id: settings.clientId,
+    client_secret: settings.clientSecret,
+    redirect_uri: settings.callbackUrl,
+    code
+  });
+  const tokens = await fetchOAuthJson(tokenUrl, { method: 'GET' });
+  if (typeof tokens.access_token !== 'string') throw new Error('OAuth token missing');
+  const profileUrl = new URL('https://graph.facebook.com/v22.0/me');
+  profileUrl.searchParams.set('fields', 'id,name,email');
+  const profile = await fetchOAuthJson(profileUrl, {
+    headers: { Authorization: `Bearer ${tokens.access_token}` }
+  });
+  return { id: profile.id, name: profile.name, email: profile.email };
+}
+
+function isEqualSecret(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return leftBytes.length === rightBytes.length && crypto.timingSafeEqual(leftBytes, rightBytes);
+}
+
 // Auth API
+app.get('/api/auth/providers', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    google: Boolean(getOAuthSettings('google')),
+    facebook: Boolean(getOAuthSettings('facebook'))
+  });
+});
+
+for (const provider of ['google', 'facebook']) {
+  app.get(`/api/auth/${provider}`, (req, res) => {
+    const settings = getOAuthSettings(provider);
+    if (!settings) {
+      return res.status(503).json({ error: 'تسجيل الدخول الاجتماعي غير مُعدّ حالياً' });
+    }
+
+    const state = crypto.randomBytes(32).toString('base64url');
+    const secure = isSecureRequest(req);
+    const stateCookie = serializeCookie(`oauth_state_${provider}`, state, [
+      'Max-Age=600',
+      `Path=/api/auth/${provider}/callback`,
+      'HttpOnly',
+      'SameSite=Lax',
+      ...(secure ? ['Secure'] : [])
+    ]);
+    const authorizationUrl = new URL(provider === 'google'
+      ? 'https://accounts.google.com/o/oauth2/v2/auth'
+      : 'https://www.facebook.com/v22.0/dialog/oauth');
+    authorizationUrl.search = new URLSearchParams({
+      client_id: settings.clientId,
+      redirect_uri: settings.callbackUrl,
+      response_type: 'code',
+      scope: provider === 'google' ? 'openid email profile' : 'email,public_profile',
+      state,
+      ...(provider === 'google' ? { prompt: 'select_account' } : {})
+    });
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Set-Cookie', stateCookie);
+    res.redirect(authorizationUrl.toString());
+  });
+
+  app.get(`/api/auth/${provider}/callback`, async (req, res) => {
+    const settings = getOAuthSettings(provider);
+    if (!settings) return res.status(503).json({ error: 'تسجيل الدخول الاجتماعي غير مُعدّ حالياً' });
+
+    const stateCookieName = `oauth_state_${provider}`;
+    const secure = isSecureRequest(req);
+    res.setHeader('Set-Cookie', clearCookie(
+      stateCookieName,
+      `/api/auth/${provider}/callback`,
+      secure
+    ));
+
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const expectedState = readCookie(req, stateCookieName);
+    if (!isEqualSecret(state, expectedState)) {
+      return redirectOAuthError(res, settings, 'invalid_state');
+    }
+    if (req.query.error || typeof req.query.code !== 'string' || req.query.code.length > 4096) {
+      return redirectOAuthError(res, settings, req.query.error ? 'cancelled' : 'provider_error');
+    }
+
+    let profile;
+    try {
+      profile = await fetchOAuthProfile(provider, settings, req.query.code);
+    } catch {
+      return redirectOAuthError(res, settings, 'provider_error');
+    }
+    const email = normalizeEmail(profile.email);
+    if (!email || (provider === 'google' && profile.emailVerified !== true) ||
+      typeof profile.id !== 'string' || !profile.id || profile.id.length > 255) {
+      return redirectOAuthError(res, settings, 'invalid_email');
+    }
+
+    const db = structuredClone(getDb());
+    let user = db.users.find((candidate) =>
+      Array.isArray(candidate.authProviders) &&
+      candidate.authProviders.some((identity) =>
+        identity.provider === provider && identity.subject === profile.id));
+
+    if (!user) {
+      if (db.users.some((candidate) => candidate.email === email)) {
+        return redirectOAuthError(res, settings, 'email_in_use');
+      }
+
+      const name = typeof profile.name === 'string' && profile.name.trim()
+        ? profile.name.trim().slice(0, 100)
+        : email.split('@')[0];
+      user = {
+        id: `usr_${crypto.randomUUID()}`,
+        name,
+        email,
+        passwordHash: null,
+        salt: null,
+        authProviders: [{ provider, subject: profile.id }],
+        createdAt: new Date().toISOString()
+      };
+      db.users.push(user);
+      initUserStarterData(db, user.id, user.name, false);
+    }
+
+    const handoffCode = crypto.randomBytes(32).toString('base64url');
+    const now = Date.now();
+    db.oauthHandoffs = (db.oauthHandoffs || [])
+      .filter((entry) => Number.isFinite(entry.expiresAt) && entry.expiresAt > now)
+      .slice(-199);
+    db.oauthHandoffs.push({
+      tokenHash: crypto.createHash('sha256').update(handoffCode).digest('hex'),
+      userId: user.id,
+      expiresAt: now + 60 * 1000
+    });
+    await saveDbAsync(db);
+
+    const handoffCookie = serializeCookie('oauth_handoff', handoffCode, [
+      'Max-Age=60',
+      'Path=/api/auth/exchange',
+      'HttpOnly',
+      secure ? 'SameSite=None' : 'SameSite=Lax',
+      ...(secure ? ['Secure'] : [])
+    ]);
+    res.setHeader('Set-Cookie', [
+      clearCookie(stateCookieName, `/api/auth/${provider}/callback`, secure),
+      handoffCookie
+    ]);
+    res.setHeader('Cache-Control', 'no-store');
+    return res.redirect(settings.appUrl);
+  });
+}
+
+app.post('/api/auth/exchange', async (req, res) => {
+  if (!isTrustedOAuthOrigin(req)) {
+    return res.status(403).json({ error: 'مصدر الطلب غير مسموح' });
+  }
+  const handoffCode = readCookie(req, 'oauth_handoff');
+  res.setHeader('Set-Cookie', clearCookie(
+    'oauth_handoff',
+    '/api/auth/exchange',
+    isSecureRequest(req)
+  ));
+  res.setHeader('Cache-Control', 'no-store');
+  if (!handoffCode || handoffCode.length !== 43) {
+    return res.status(401).json({ error: 'جلسة تسجيل الدخول غير صالحة أو منتهية' });
+  }
+
+  const tokenHash = crypto.createHash('sha256').update(handoffCode).digest('hex');
+  const userId = await consumeOAuthHandoff(tokenHash);
+  if (!userId) return res.status(401).json({ error: 'جلسة تسجيل الدخول غير صالحة أو منتهية' });
+
+  const user = getDb().users.find((candidate) => candidate.id === userId);
+  if (!user) return res.status(401).json({ error: 'المستخدم غير موجود' });
+  const token = createToken(user.id);
+  return res.json({
+    token,
+    user: { id: user.id, name: user.name, email: user.email }
+  });
+});
+
 app.post('/api/auth/register', (req, res) => {
   const { name, email, password } = req.body;
-  if (!name || !email || !password) {
+  if (typeof name !== 'string' || typeof email !== 'string' ||
+    typeof password !== 'string' || !name.trim() || !password) {
     return res.status(400).json({ error: 'الاسم والبريد وكلمة المرور مطلوبة' });
   }
+  if (password.length > 1024) return res.status(400).json({ error: 'كلمة المرور طويلة جداً' });
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return res.status(400).json({ error: 'البريد الإلكتروني غير صالح' });
+
   const db = getDb();
-  const normalizedEmail = email.trim().toLowerCase();
   if (db.users.some((u) => u.email === normalizedEmail)) {
     return res.status(400).json({ error: 'هذا البريد مسجل بالفعل' });
   }
 
   const { hash, salt } = hashPassword(password);
-  const userId = `usr_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const userId = `usr_${crypto.randomUUID()}`;
   const newUser = {
     id: userId,
-    name: name.trim(),
+    name: name.trim().slice(0, 100),
     email: normalizedEmail,
     passwordHash: hash,
     salt,
@@ -357,11 +675,14 @@ app.post('/api/auth/register', (req, res) => {
 
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) {
+  if (typeof email !== 'string' || typeof password !== 'string' || !password) {
     return res.status(400).json({ error: 'البريد وكلمة المرور مطلوبة' });
   }
+  if (password.length > 1024) return res.status(400).json({ error: 'كلمة المرور طويلة جداً' });
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return res.status(400).json({ error: 'البريد الإلكتروني غير صالح' });
+
   const db = getDb();
-  const normalizedEmail = email.trim().toLowerCase();
   const user = db.users.find((u) => u.email === normalizedEmail);
   if (!user || !verifyPassword(password, user.passwordHash, user.salt)) {
     return res.status(401).json({ error: 'بيانات الدخول غير صحيحة' });

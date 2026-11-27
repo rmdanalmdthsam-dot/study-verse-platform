@@ -10,6 +10,8 @@ const {
   createMediaToken,
   createToken,
   getMediaTokenClaims,
+  normalizeEmail,
+  verifyPassword,
   verifyMediaToken,
   verifyToken
 } = await import('./db.js');
@@ -55,4 +57,32 @@ test('media tokens are short-lived and scoped to one owner and file', () => {
     sessionId: 'session-1',
     exp: Date.now() - 1
   }, 'media:'), 'file-1'), null);
+});
+
+test('email addresses are normalized and malformed addresses are rejected', () => {
+  assert.equal(normalizeEmail('  Student.Name+tag@Example.COM  '), 'student.name+tag@example.com');
+  assert.equal(normalizeEmail('student@bücher.de'), 'student@xn--bcher-kva.de');
+
+  for (const email of [
+    '',
+    'student',
+    'student@@example.com',
+    '.student@example.com',
+    'student..name@example.com',
+    'student@example',
+    'student@example.123',
+    'student@-example.com',
+    `a${'x'.repeat(64)}@example.com`,
+    `student@${'a'.repeat(64)}.com`,
+    `student@${'a'.repeat(250)}.com`,
+    'student @example.com',
+    'student@127.0.0.1'
+  ]) {
+    assert.equal(normalizeEmail(email), null, email);
+  }
+});
+
+test('password verification safely rejects accounts without password credentials', () => {
+  assert.equal(verifyPassword('password', null, null), false);
+  assert.equal(verifyPassword('password', 'not-a-hash', 'salt'), false);
 });

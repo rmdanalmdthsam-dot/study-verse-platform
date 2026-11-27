@@ -27,6 +27,31 @@ export function getCurrentUser() {
   }
 }
 
+export async function getAuthProviders() {
+  const response = await fetch(apiUrl('/api/auth/providers'), { credentials: 'include' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر التحقق من طرق تسجيل الدخول');
+  return data;
+}
+
+export function getOAuthStartUrl(provider) {
+  if (!['google', 'facebook'].includes(provider)) throw new Error('مزود تسجيل دخول غير صالح');
+  return apiUrl(`/api/auth/${provider}`);
+}
+
+export async function exchangeOAuthSession() {
+  const response = await fetch(apiUrl('/api/auth/exchange'), {
+    method: 'POST',
+    credentials: 'include'
+  });
+  if (response.status === 401) return null;
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر إكمال تسجيل الدخول');
+  setAuthToken(data.token);
+  setCurrentUser(data.user);
+  return data;
+}
+
 export async function getFileContentUrl(file) {
   if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) {
     return file.url?.startsWith('/') && !file.url.startsWith('//') ? apiUrl(file.url) : file.url;
