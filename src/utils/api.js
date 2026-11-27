@@ -1,6 +1,13 @@
 import { uploadPresigned } from '@vercel/blob/client';
 
-const BASE_URL = '';
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/+$/, '');
+if (import.meta.env.PROD && BASE_URL && !BASE_URL.startsWith('https://')) {
+  throw new Error('VITE_API_BASE_URL must use HTTPS in production');
+}
+
+function apiUrl(path) {
+  return `${BASE_URL}${path}`;
+}
 
 export function getAuthToken() {
   return localStorage.getItem('study_token');
@@ -20,10 +27,51 @@ export function getCurrentUser() {
   }
 }
 
-export function getFileContentUrl(file) {
-  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) return file.url;
-  const token = encodeURIComponent(getAuthToken() || '');
-  return `/api/files/${encodeURIComponent(file.id)}/content?token=${token}`;
+export async function getAuthProviders() {
+  const response = await fetch(apiUrl('/api/auth/providers'), { credentials: 'include' });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر التحقق من طرق تسجيل الدخول');
+  return data;
+}
+
+export function getOAuthStartUrl(provider) {
+  if (!['google', 'facebook'].includes(provider)) throw new Error('مزود تسجيل دخول غير صالح');
+  return apiUrl(`/api/auth/${provider}`);
+}
+
+export async function exchangeOAuthSession() {
+  const response = await fetch(apiUrl('/api/auth/exchange'), {
+    method: 'POST',
+    credentials: 'include'
+  });
+  if (response.status === 401) return null;
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر إكمال تسجيل الدخول');
+  setAuthToken(data.token);
+  setCurrentUser(data.user);
+  return data;
+}
+
+export async function getFileContentUrl(file) {
+  if (file.storage !== 'blob' && !file.url?.startsWith('/uploads/')) {
+    return file.url?.startsWith('/') && !file.url.startsWith('//') ? apiUrl(file.url) : file.url;
+  }
+  const response = await fetch(apiUrl(`/api/files/${encodeURIComponent(file.id)}/access`), {
+    method: 'POST',
+    headers: authHeaders(),
+    credentials: 'include'
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'تعذر فتح الملف');
+  return apiUrl(data.url);
+}
+
+export function getDownloadUrl(contentUrl) {
+  const downloadUrl = new URL(contentUrl, window.location.origin);
+  if (/\/api\/files\/[^/]+\/content$/.test(downloadUrl.pathname)) {
+    downloadUrl.searchParams.set('download', '1');
+  }
+  return downloadUrl.toString();
 }
 
 export async function downloadBackup(onProgress) {
@@ -62,14 +110,16 @@ export async function downloadBackup(onProgress) {
       const file = files[index];
       let contentUrl;
       if (file.storage === 'blob' || file.url?.startsWith('/uploads/')) {
-        contentUrl = getFileContentUrl(file);
+        contentUrl = `${BASE_URL}/api/files/${encodeURIComponent(file.id)}/content`;
       } else if (file.url?.startsWith('/') && !file.url.startsWith('//')) {
         contentUrl = file.url;
       } else {
         throw new Error(`مسار الملف "${file.title}" غير صالح للنسخ الاحتياطي`);
       }
 
-      const fileResponse = await fetch(contentUrl);
+      const fileResponse = await fetch(contentUrl, {
+        headers: file.storage === 'blob' || file.url?.startsWith('/uploads/') ? authHeaders() : undefined
+      });
       if (!fileResponse.ok || !fileResponse.body) {
         throw new Error(`تعذر تنزيل الملف "${file.title}"؛ لم تكتمل النسخة الاحتياطية`);
       }
@@ -150,9 +200,25 @@ export async function login(email, password) {
   return data;
 }
 
-export function logout() {
+export async function logout() {
+  let revokeError;
+  if (getAuthToken()) {
+    try {
+      const response = await fetch(`${BASE_URL}/api/auth/logout`, {
+        method: 'POST',
+        headers: authHeaders()
+      });
+      if (!response.ok) throw new Error('تعذر إنهاء الجلسة على الخادم');
+    } catch (error) {
+      revokeError = error;
+    }
+  }
   setAuthToken(null);
   setCurrentUser(null);
+  if (revokeError) {
+    console.error('Server-side logout failed:', revokeError);
+    window.alert('تم تسجيل الخروج من هذا الجهاز، لكن تعذر إبطال الجلسة على الخادم. أعد المحاولة عند توفر الاتصال.');
+  }
   window.location.reload();
 }
 
@@ -227,7 +293,7 @@ export async function uploadFile(formData, onProgress) {
   try {
     const blob = await uploadPresigned(pathname, file, {
       access: 'private',
-      handleUploadUrl: `${BASE_URL}/api/files/upload-presigned`,
+      handleUploadUrl: apiUrl('/api/files/upload-presigned'),
       headers: { Authorization: `Bearer ${token}` },
       contentType: metadata.contentType,
       clientPayload: JSON.stringify(metadata),

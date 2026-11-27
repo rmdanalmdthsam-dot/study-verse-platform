@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
+import { domainToASCII, fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -10,7 +10,10 @@ const DATA_DIR = process.env.VERCEL === '1'
   ? path.join('/tmp', 'study-verse-data')
   : path.join(__dirname, 'data');
 const DB_FILE = path.join(DATA_DIR, 'database.json');
-const SECRET_KEY = process.env.JWT_SECRET || 'study_app_token_secret_key_2026';
+const SECRET_KEY = process.env.JWT_SECRET;
+if (!SECRET_KEY || SECRET_KEY.trim().length < 32 || SECRET_KEY !== SECRET_KEY.trim()) {
+  throw new Error('JWT_SECRET must be configured as a strong, unpadded value of at least 32 characters');
+}
 const cloudUrl = process.env.DATABASE_URL || process.env.POSTGRES_URL || '';
 let sql = null;
 let cloudLoaded = false;
@@ -35,39 +38,120 @@ export function hashPassword(password) {
 }
 
 export function verifyPassword(password, hash, salt) {
+  if (typeof password !== 'string' || typeof hash !== 'string' || typeof salt !== 'string') return false;
   const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return testHash === hash;
+  const expected = Buffer.from(hash, 'hex');
+  const actual = Buffer.from(testHash, 'hex');
+  return expected.length === actual.length && crypto.timingSafeEqual(actual, expected);
+}
+
+export function normalizeEmail(email) {
+  if (typeof email !== 'string') return null;
+  const value = email.trim();
+  const hasWhitespaceOrControl = Array.from(value).some((character) => {
+    const code = character.codePointAt(0);
+    return /\s/.test(character) || code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+  });
+  if (!value || value.length > 254 || hasWhitespaceOrControl) return null;
+
+  const separator = value.lastIndexOf('@');
+  if (separator <= 0 || separator !== value.indexOf('@')) return null;
+
+  const local = value.slice(0, separator);
+  const domain = domainToASCII(value.slice(separator + 1)).toLowerCase();
+  if (!domain || local.length > 64 || local.startsWith('.') || local.endsWith('.') ||
+    local.includes('..') || !/^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$/.test(local)) {
+    return null;
+  }
+
+  const labels = domain.split('.');
+  if (labels.length < 2 || !/[a-z]/.test(labels.at(-1)) || labels.some((label) =>
+    label.length > 63 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
+    return null;
+  }
+
+  const normalized = `${local.toLowerCase()}@${domain}`;
+  return normalized.length <= 254 ? normalized : null;
 }
 
 export function createToken(userId) {
   const payload = Buffer.from(
-    JSON.stringify({ userId, exp: Date.now() + 30 * 24 * 60 * 60 * 1000 })
+    JSON.stringify({ userId, jti: crypto.randomUUID(), exp: Date.now() + 30 * 24 * 60 * 60 * 1000 })
   ).toString('base64url');
   const signature = crypto.createHmac('sha256', SECRET_KEY).update(payload).digest('base64url');
   return `${payload}.${signature}`;
 }
 
-export function verifyToken(token) {
-  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
-  const [payload, signature] = token.split('.');
-  const expectedSig = crypto.createHmac('sha256', SECRET_KEY).update(payload).digest('base64url');
-  if (signature !== expectedSig) return null;
+export function createMediaToken(userId, fileId, sessionId) {
+  const payload = Buffer.from(JSON.stringify({
+    purpose: 'file-content',
+    userId,
+    fileId,
+    sessionId,
+    exp: Date.now() + 15 * 60 * 1000
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', SECRET_KEY).update(`media:${payload}`).digest('base64url');
+  return `${payload}.${signature}`;
+}
+
+function isValidSignature(payload, signature, prefix = '') {
+  const expected = crypto.createHmac('sha256', SECRET_KEY).update(`${prefix}${payload}`).digest();
+  let actual;
   try {
-    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (data.exp && data.exp < Date.now()) return null;
-    return data.userId;
+    actual = Buffer.from(signature, 'base64url');
+  } catch {
+    return false;
+  }
+  return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+}
+
+export function getTokenClaims(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2 || !isValidSignature(parts[0], parts[1])) return null;
+  try {
+    const data = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    if (typeof data.userId !== 'string' || !data.userId || typeof data.jti !== 'string' || !data.jti ||
+      typeof data.exp !== 'number' || !Number.isFinite(data.exp) || data.exp <= Date.now()) return null;
+    return data;
   } catch {
     return null;
   }
 }
 
+export function verifyToken(token) {
+  return getTokenClaims(token)?.userId || null;
+}
+
+export function getMediaTokenClaims(token, fileId) {
+  if (!token || typeof token !== 'string' || typeof fileId !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2 || !isValidSignature(parts[0], parts[1], 'media:')) return null;
+  try {
+    const data = JSON.parse(Buffer.from(parts[0], 'base64url').toString('utf8'));
+    if (data.purpose !== 'file-content' || data.fileId !== fileId ||
+      typeof data.userId !== 'string' || !data.userId ||
+      typeof data.sessionId !== 'string' || !data.sessionId ||
+      typeof data.exp !== 'number' || !Number.isFinite(data.exp) || data.exp <= Date.now()) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export function verifyMediaToken(token, fileId) {
+  return getMediaTokenClaims(token, fileId)?.userId || null;
+}
+
 const defaultStructure = {
   users: [],
+  oauthHandoffs: [],
   subjects: [],
   files: [],
   notes: [],
   flashcards: [],
-  pomodoroSessions: []
+  pomodoroSessions: [],
+  revokedTokens: []
 };
 
 export async function loadCloudDb() {
@@ -77,6 +161,8 @@ export async function loadCloudDb() {
     const rows = await sql`SELECT data FROM study_app_state WHERE id = 1`;
     if (rows.length) {
       cloudDb = rows[0].data;
+      if (!Array.isArray(cloudDb.revokedTokens)) cloudDb.revokedTokens = [];
+      if (!Array.isArray(cloudDb.oauthHandoffs)) cloudDb.oauthHandoffs = [];
     } else {
       cloudDb = structuredClone(defaultStructure);
       await sql`INSERT INTO study_app_state (id, data) VALUES (1, ${JSON.stringify(cloudDb)}::jsonb)`;
@@ -99,11 +185,13 @@ function getLocalDb() {
     const parsed = JSON.parse(raw);
     return {
       users: parsed.users || [],
+      oauthHandoffs: Array.isArray(parsed.oauthHandoffs) ? parsed.oauthHandoffs : [],
       subjects: parsed.subjects || [],
       files: parsed.files || [],
       notes: parsed.notes || [],
       flashcards: parsed.flashcards || [],
-      pomodoroSessions: parsed.pomodoroSessions || []
+      pomodoroSessions: parsed.pomodoroSessions || [],
+      revokedTokens: Array.isArray(parsed.revokedTokens) ? parsed.revokedTokens : []
     };
   } catch {
     return structuredClone(defaultStructure);
@@ -121,11 +209,13 @@ export function getDb() {
     const parsed = JSON.parse(raw);
     return {
       users: parsed.users || [],
+      oauthHandoffs: Array.isArray(parsed.oauthHandoffs) ? parsed.oauthHandoffs : [],
       subjects: parsed.subjects || [],
       files: parsed.files || [],
       notes: parsed.notes || [],
       flashcards: parsed.flashcards || [],
-      pomodoroSessions: parsed.pomodoroSessions || []
+      pomodoroSessions: parsed.pomodoroSessions || [],
+      revokedTokens: Array.isArray(parsed.revokedTokens) ? parsed.revokedTokens : []
     };
   } catch {
     return defaultStructure;
@@ -167,7 +257,77 @@ export async function saveDbAsync(data) {
   return true;
 }
 
-export function initUserStarterData(db, userId, userName = 'طالب') {
+export async function consumeOAuthHandoff(tokenHash) {
+  const now = Date.now();
+  if (sql) {
+    const rows = await sql`
+      WITH locked AS MATERIALIZED (
+        SELECT data
+        FROM study_app_state
+        WHERE id = 1
+          AND EXISTS (
+            SELECT 1
+            FROM jsonb_array_elements(COALESCE(data->'oauthHandoffs', '[]'::jsonb)) AS handoff(value)
+            WHERE handoff.value->>'tokenHash' = ${tokenHash}
+              AND CASE
+                WHEN handoff.value->>'expiresAt' ~ '^[0-9]+$'
+                  THEN (handoff.value->>'expiresAt')::bigint > ${now}
+                ELSE false
+              END
+          )
+        FOR UPDATE
+      ),
+      consumed AS (
+        SELECT handoff.value->>'userId' AS user_id
+        FROM locked
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(locked.data->'oauthHandoffs', '[]'::jsonb)) AS handoff(value)
+        WHERE handoff.value->>'tokenHash' = ${tokenHash}
+          AND CASE
+            WHEN handoff.value->>'expiresAt' ~ '^[0-9]+$'
+              THEN (handoff.value->>'expiresAt')::bigint > ${now}
+            ELSE false
+          END
+      ),
+      updated AS (
+        UPDATE study_app_state
+        SET data = jsonb_set(
+          study_app_state.data,
+          '{oauthHandoffs}',
+          COALESCE((
+            SELECT jsonb_agg(handoff.value)
+            FROM jsonb_array_elements(COALESCE(study_app_state.data->'oauthHandoffs', '[]'::jsonb)) AS handoff(value)
+            WHERE handoff.value->>'tokenHash' <> ${tokenHash}
+              AND CASE
+                WHEN handoff.value->>'expiresAt' ~ '^[0-9]+$'
+                  THEN (handoff.value->>'expiresAt')::bigint > ${now}
+                ELSE false
+              END
+          ), '[]'::jsonb),
+          true
+        ),
+        updated_at = NOW()
+        WHERE id = 1 AND EXISTS (SELECT 1 FROM consumed)
+        RETURNING data
+      )
+      SELECT consumed.user_id, updated.data
+      FROM consumed
+      CROSS JOIN updated
+    `;
+    if (!rows.length) return null;
+    cloudDb = rows[0].data;
+    return rows[0].user_id || null;
+  }
+
+  const db = structuredClone(getDb());
+  const handoff = db.oauthHandoffs.find((entry) =>
+    entry.tokenHash === tokenHash && Number.isFinite(entry.expiresAt) && entry.expiresAt > now);
+  db.oauthHandoffs = db.oauthHandoffs.filter((entry) =>
+    entry.tokenHash !== tokenHash && Number.isFinite(entry.expiresAt) && entry.expiresAt > now);
+  await saveDbAsync(db);
+  return handoff?.userId || null;
+}
+
+export function initUserStarterData(db, userId, userName = 'طالب', persist = true) {
   const s1 = `sub-${userId}-1`;
   const s2 = `sub-${userId}-2`;
 
@@ -244,5 +404,5 @@ export function initUserStarterData(db, userId, userName = 'طالب') {
   db.files.push(...newFiles);
   db.notes.push(...newNotes);
   db.flashcards.push(...newFlashcards);
-  saveDb(db);
+  if (persist) saveDb(db);
 }

@@ -1,14 +1,64 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { User, Lock, Mail, BookOpen, AlertCircle, ArrowLeft } from 'lucide-react';
-import { login, register } from '../utils/api';
+import {
+  exchangeOAuthSession,
+  getAuthProviders,
+  getOAuthStartUrl,
+  login,
+  register
+} from '../utils/api';
+
+const oauthErrorMessages = {
+  cancelled: 'تم إلغاء تسجيل الدخول.',
+  email_in_use: 'هذا البريد مرتبط بحساب موجود. سجل الدخول بالبريد وكلمة المرور.',
+  invalid_email: 'تعذر التحقق من البريد من مزود تسجيل الدخول.',
+  invalid_state: 'انتهت صلاحية محاولة تسجيل الدخول. حاول مرة أخرى.',
+  provider_error: 'تعذر إكمال تسجيل الدخول. حاول مرة أخرى.'
+};
+
+function getOAuthErrorMessage() {
+  if (typeof window === 'undefined') return null;
+  const error = new URLSearchParams(window.location.hash.slice(1)).get('oauth_error');
+  return error ? oauthErrorMessages[error] || oauthErrorMessages.provider_error : null;
+}
 
 export default function AuthModal({ onLoginSuccess }) {
   const [isLoginTab, setIsLoginTab] = useState(true);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState(null);
+  const [error, setError] = useState(getOAuthErrorMessage);
   const [loading, setLoading] = useState(false);
+  const [providers, setProviders] = useState({ google: false, facebook: false });
+
+  useEffect(() => {
+    let active = true;
+    const oauthError = new URLSearchParams(window.location.hash.slice(1)).get('oauth_error');
+    if (oauthError) {
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+    }
+
+    getAuthProviders()
+      .then((available) => {
+        if (active) setProviders({
+          google: available.google === true,
+          facebook: available.facebook === true
+        });
+      })
+      .catch(() => {
+        if (active) setProviders({ google: false, facebook: false });
+      });
+
+    exchangeOAuthSession()
+      .then((session) => {
+        if (active && session) onLoginSuccess?.(session.user);
+      })
+      .catch((err) => {
+        if (active) setError(err.message || 'تعذر إكمال تسجيل الدخول');
+      });
+
+    return () => { active = false; };
+  }, [onLoginSuccess]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -84,6 +134,7 @@ export default function AuthModal({ onLoginSuccess }) {
                 <input
                   type="text"
                   required
+                  maxLength={100}
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="مثال: أحمد مصطفى"
@@ -100,6 +151,7 @@ export default function AuthModal({ onLoginSuccess }) {
               <input
                 type="email"
                 required
+                maxLength={254}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="name@example.com"
@@ -132,6 +184,47 @@ export default function AuthModal({ onLoginSuccess }) {
             <ArrowLeft className="w-4 h-4" />
           </button>
         </form>
+
+        <>
+          <div className="flex items-center gap-3 my-5 text-[10px] text-slate-500">
+            <span className="h-px flex-1 bg-slate-800" />
+            أو سجل الدخول باستخدام
+            <span className="h-px flex-1 bg-slate-800" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              disabled={!providers.google || loading}
+              onClick={() => window.location.assign(getOAuthStartUrl('google'))}
+              title={providers.google ? undefined : 'تسجيل الدخول عبر Google غير مفعّل بعد'}
+              className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition enabled:hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="font-black text-base text-blue-400">G</span>
+              <span className="text-center leading-tight">
+                Google
+                {!providers.google && <span className="block text-[9px] text-slate-500">غير مفعّل</span>}
+              </span>
+            </button>
+            <button
+              type="button"
+              disabled={!providers.facebook || loading}
+              onClick={() => window.location.assign(getOAuthStartUrl('facebook'))}
+              title={providers.facebook ? undefined : 'تسجيل الدخول عبر Facebook غير مفعّل بعد'}
+              className="flex items-center justify-center gap-2 rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-xs font-bold text-white transition enabled:hover:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="text-base font-black text-blue-500">f</span>
+              <span className="text-center leading-tight">
+                Facebook
+                {!providers.facebook && <span className="block text-[9px] text-slate-500">غير مفعّل</span>}
+              </span>
+            </button>
+          </div>
+          {(!providers.google || !providers.facebook) && (
+            <p className="mt-2 text-center text-[10px] text-slate-500">
+              خيارات الدخول الاجتماعي غير مفعّلة حالياً
+            </p>
+          )}
+        </>
 
         <div className="mt-6 pt-4 border-t border-slate-800 text-center">
           <p className="text-[11px] text-slate-400">
