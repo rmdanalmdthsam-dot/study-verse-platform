@@ -15,6 +15,7 @@
   "dependencies": {
     "@neondatabase/serverless": "^1.2.1",
     "@tailwindcss/vite": "^4.3.5",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.9.0",
     "@zip.js/zip.js": "^2.25.0",
     "cors": "^2.8.6",
